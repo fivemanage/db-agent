@@ -30,6 +30,7 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: release-manifest keygen|public-key|sign [flags]")
 	}
+
 	switch args[0] {
 	case "keygen":
 		flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
@@ -40,10 +41,12 @@ func run(args []string) error {
 		if *privatePath == "" || flags.NArg() != 0 {
 			return errors.New("keygen requires --private PATH")
 		}
+
 		public, private, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			return err
 		}
+
 		file, err := os.OpenFile(*privatePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return err
@@ -56,7 +59,9 @@ func run(args []string) error {
 		if err := file.Close(); err != nil {
 			return err
 		}
+
 		fmt.Println(base64.StdEncoding.EncodeToString(public))
+
 		return nil
 	case "public-key":
 		flags := flag.NewFlagSet("public-key", flag.ContinueOnError)
@@ -67,11 +72,14 @@ func run(args []string) error {
 		if *privatePath == "" || flags.NArg() != 0 {
 			return errors.New("public-key requires --private PATH")
 		}
+
 		private, err := readPrivateKey(*privatePath)
 		if err != nil {
 			return err
 		}
+
 		fmt.Println(base64.StdEncoding.EncodeToString(private.Public().(ed25519.PublicKey)))
+
 		return nil
 	case "sign":
 		flags := flag.NewFlagSet("sign", flag.ContinueOnError)
@@ -88,24 +96,29 @@ func run(args []string) error {
 		if *privatePath == "" || *artifact == "" || *version == "" || *goos == "" || *goarch == "" || *artifactURL == "" || *output == "" || flags.NArg() != 0 {
 			return errors.New("sign requires --private, --artifact, --version, --os, --arch, --url, and --output")
 		}
+
 		private, err := readPrivateKey(*privatePath)
 		if err != nil {
 			return err
 		}
+
 		file, err := os.Open(*artifact)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
+
 		hash := sha256.New()
 		if _, err := io.Copy(hash, file); err != nil {
 			return err
 		}
+
 		manifest := update.Manifest{Version: *version, OS: *goos, Arch: *goarch, URL: *artifactURL, SHA256: hex.EncodeToString(hash.Sum(nil))}
 		manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, manifest.Payload()))
 		if _, err := manifest.Verify(private.Public().(ed25519.PublicKey), "0.0.0", *goos, *goarch); err != nil {
 			return err
 		}
+
 		outputFile, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if err != nil {
 			return err
@@ -117,6 +130,7 @@ func run(args []string) error {
 			os.Remove(*output)
 			return err
 		}
+
 		return outputFile.Close()
 	default:
 		return errors.New("usage: release-manifest keygen|public-key|sign [flags]")
@@ -128,9 +142,11 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	private, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
 	if err != nil || len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("private key must be base64-encoded Ed25519")
 	}
+
 	return ed25519.PrivateKey(private), nil
 }

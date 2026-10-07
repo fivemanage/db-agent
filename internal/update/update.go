@@ -45,24 +45,30 @@ func (m Manifest) Verify(publicKey ed25519.PublicKey, currentVersion, goos, goar
 	if len(publicKey) != ed25519.PublicKeySize {
 		return false, errors.New("update signing public key is missing or invalid")
 	}
+
 	if m.OS != goos || m.Arch != goarch {
 		return false, fmt.Errorf("update targets %s/%s, not %s/%s", m.OS, m.Arch, goos, goarch)
 	}
+
 	if err := requireHTTPS(m.URL); err != nil {
 		return false, fmt.Errorf("artifact URL: %w", err)
 	}
+
 	checksum, err := hex.DecodeString(m.SHA256)
 	if err != nil || len(checksum) != sha256.Size || strings.ToLower(m.SHA256) != m.SHA256 {
 		return false, errors.New("update checksum must be a lowercase SHA-256 hex digest")
 	}
+
 	signature, err := base64.StdEncoding.DecodeString(m.Signature)
 	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(publicKey, m.Payload(), signature) {
 		return false, errors.New("update manifest signature is invalid")
 	}
+
 	comparison, err := compareVersions(m.Version, currentVersion)
 	if err != nil {
 		return false, err
 	}
+
 	return comparison > 0, nil
 }
 
@@ -71,6 +77,7 @@ func PublicKey(encoded string) (ed25519.PublicKey, error) {
 	if err != nil || len(key) != ed25519.PublicKeySize {
 		return nil, errors.New("update signing public key must be base64-encoded Ed25519")
 	}
+
 	return ed25519.PublicKey(key), nil
 }
 
@@ -92,6 +99,7 @@ func (c Client) platform() (string, string) {
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
+
 	return goos, goarch
 }
 
@@ -101,19 +109,24 @@ func (c Client) httpClient() *http.Client {
 		copy := *c.HTTP
 		client = &copy
 	}
+
 	priorCheck := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := requireHTTPS(req.URL.String()); err != nil {
 			return err
 		}
+
 		if len(via) >= 5 {
 			return errors.New("too many update redirects")
 		}
+
 		if priorCheck != nil {
 			return priorCheck(req, via)
 		}
+
 		return nil
 	}
+
 	return client
 }
 
@@ -121,6 +134,7 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	if err := requireHTTPS(c.ManifestURL); err != nil {
 		return Manifest{}, false, fmt.Errorf("manifest URL: %w", err)
 	}
+
 	u, _ := url.Parse(c.ManifestURL)
 	goos, goarch := c.platform()
 	query := u.Query()
@@ -128,6 +142,7 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	query.Set("arch", goarch)
 	query.Set("current_version", c.Version)
 	u.RawQuery = query.Encode()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Manifest{}, false, err
@@ -135,20 +150,25 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	if c.Credential != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Credential)
 	}
+
 	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return Manifest{}, false, fmt.Errorf("fetch update manifest: %w", err)
 	}
 	defer res.Body.Close()
+
 	if err := requireHTTPS(res.Request.URL.String()); err != nil {
 		return Manifest{}, false, fmt.Errorf("manifest response: %w", err)
 	}
+
 	if res.Request.URL.Host != u.Host {
 		return Manifest{}, false, errors.New("update manifest redirected to another host")
 	}
+
 	if res.StatusCode != http.StatusOK {
 		return Manifest{}, false, fmt.Errorf("update manifest returned HTTP %d", res.StatusCode)
 	}
+
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxManifestBytes+1))
 	if err != nil {
 		return Manifest{}, false, err
@@ -156,6 +176,7 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	if len(body) > maxManifestBytes {
 		return Manifest{}, false, errors.New("update manifest is too large")
 	}
+
 	var manifest Manifest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
@@ -165,10 +186,12 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return Manifest{}, false, errors.New("update manifest contains trailing data")
 	}
+
 	available, err := manifest.Verify(c.PublicKey, c.Version, goos, goarch)
 	if err != nil {
 		return Manifest{}, false, err
 	}
+
 	return manifest, available, nil
 }
 
@@ -180,34 +203,43 @@ func (c Client) Stage(ctx context.Context, manifest Manifest, executablePath str
 	if err != nil {
 		return "", err
 	}
+
 	if !available {
 		return "", errors.New("manifest does not contain a newer version")
 	}
+
 	if err := requireHTTPS(manifest.URL); err != nil {
 		return "", err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.URL, nil)
 	if err != nil {
 		return "", err
 	}
+
 	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download update: %w", err)
 	}
 	defer res.Body.Close()
+
 	if err := requireHTTPS(res.Request.URL.String()); err != nil {
 		return "", fmt.Errorf("artifact response: %w", err)
 	}
+
 	if res.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("artifact returned HTTP %d", res.StatusCode)
 	}
+
 	if res.ContentLength > maxArtifactBytes {
 		return "", errors.New("update artifact is too large")
 	}
+
 	suffix := ""
 	if goos == "windows" {
 		suffix = ".exe"
 	}
+
 	file, err := os.CreateTemp(filepath.Dir(executablePath), ".db-agent-stage-*"+suffix)
 	if err != nil {
 		return "", fmt.Errorf("stage update beside executable: %w", err)
@@ -220,30 +252,38 @@ func (c Client) Stage(ctx context.Context, manifest Manifest, executablePath str
 			os.Remove(path)
 		}
 	}()
+
 	if err = file.Chmod(0700); err != nil {
 		return "", err
 	}
+
 	hash := sha256.New()
 	count, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(res.Body, maxArtifactBytes+1))
 	if copyErr != nil {
 		err = fmt.Errorf("download update: %w", copyErr)
 		return "", err
 	}
+
 	if count > maxArtifactBytes {
 		err = errors.New("update artifact is too large")
 		return "", err
 	}
+
 	if hex.EncodeToString(hash.Sum(nil)) != manifest.SHA256 {
 		err = errors.New("update artifact checksum mismatch")
 		return "", err
 	}
+
 	if err = file.Sync(); err != nil {
 		return "", err
 	}
+
 	if err = file.Close(); err != nil {
 		return "", err
 	}
+
 	complete = true
+
 	return path, nil
 }
 
@@ -252,6 +292,7 @@ func requireHTTPS(raw string) error {
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return errors.New("HTTPS URL without embedded credentials or fragment required")
 	}
+
 	return nil
 }
 
@@ -260,10 +301,12 @@ func compareVersions(a, b string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("update version: %w", err)
 	}
+
 	right, err := parseVersion(b)
 	if err != nil {
 		return 0, fmt.Errorf("installed version: %w", err)
 	}
+
 	for i := range left {
 		if left[i] > right[i] {
 			return 1, nil
@@ -272,6 +315,7 @@ func compareVersions(a, b string) (int, error) {
 			return -1, nil
 		}
 	}
+
 	return 0, nil
 }
 
@@ -282,15 +326,19 @@ func parseVersion(value string) ([3]uint64, error) {
 	if len(fields) != 3 {
 		return parts, errors.New("expected a stable major.minor.patch version")
 	}
+
 	for i, field := range fields {
 		if field == "" || (len(field) > 1 && field[0] == '0') {
 			return parts, errors.New("invalid version component")
 		}
+
 		n, err := strconv.ParseUint(field, 10, 64)
 		if err != nil {
 			return parts, errors.New("invalid version component")
 		}
+
 		parts[i] = n
 	}
+
 	return parts, nil
 }

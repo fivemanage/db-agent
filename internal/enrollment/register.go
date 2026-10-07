@@ -1,112 +1,167 @@
 package enrollment
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"runtime"
-	"strings"
-	"time"
+
+	"github.com/fivemanage/db-agent/internal/config"
+	"github.com/fivemanage/db-agent/internal/controlplane"
 )
 
-var (
-	ErrInvalidToken      = errors.New("setup token is invalid, expired, or already used; generate a new token in the dashboard")
-	ErrAlreadyRegistered = errors.New("this database already has an agent; check the dashboard before trying again")
-)
+var ErrInvalidToken = controlplane.ErrInvalidEnrollmentToken
+var ErrAlreadyRegistered = controlplane.ErrAlreadyRegistered
 
-type registrationRequest struct {
-	AgentVersion string `json:"agent_version"`
-	Hostname     string `json:"hostname"`
-	OS           string `json:"os"`
-	Arch         string `json:"arch"`
+func metadata(version string) (controlplane.RegistrationMetadata, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return controlplane.RegistrationMetadata{}, errors.New("cannot read local hostname")
+	}
+
+	return controlplane.RegistrationMetadata{AgentVersion: version, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH}, nil
 }
 
-type registrationResponse struct {
-	AgentCredential string `json:"agent_credential"`
-}
-
+// Register keeps one candidate credential across all retries in this invocation.
+// The install command uses Enroll to preserve it across process restarts too.
 func Register(ctx context.Context, apiURL, token, version string) (string, error) {
-	if strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") {
-		return "", errors.New("setup token is required and must be a single line")
+	client, err := controlplane.NewEnrollment(apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	candidate, err := controlplane.GenerateCredential()
+	if err != nil {
+		return "", err
+	}
+
+	m, err := metadata(version)
+	if err != nil {
+		return "", err
+	}
+
+	result, err := client.Register(ctx, token, candidate, m)
+
+	return result.AgentCredential, err
+}
+
+func Enroll(ctx context.Context, configPath, apiURL, token, version string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	if err := ValidateAPIURL(apiURL); err != nil {
 		return "", err
 	}
 
-	base, _ := url.Parse(apiURL)
+	if _, err := os.Lstat(config.ResolvePath(configPath)); err == nil {
+		return "", errors.New("config already exists; enrollment will not overwrite it")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("cannot check config before enrollment")
+	}
 
-	hostname, err := os.Hostname()
+	pending, err := config.LoadPendingEnrollment(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		credential, err := controlplane.GenerateCredential()
+		if err != nil {
+			return "", err
+		}
+
+		pending = config.PendingEnrollment{APIURL: apiURL, Credential: credential}
+		if err := config.SavePendingEnrollment(configPath, pending); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	if pending.APIURL != apiURL {
+		return "", errors.New("pending enrollment uses a different API URL; do not replace or rotate the pending credential")
+	}
+
+	client, err := controlplane.NewEnrollment(apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("read hostname: %w", err)
+		return "", err
 	}
 
-	body, err := json.Marshal(registrationRequest{AgentVersion: version, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH})
+	m, err := metadata(version)
 	if err != nil {
-		return "", fmt.Errorf("encode registration request: %w", err)
+		return "", err
 	}
 
-	endpoint := strings.TrimRight(base.String(), "/") + "/v1/agent/register"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	result, err := client.Register(ctx, token, pending.Credential, m)
 	if err != nil {
-		return "", fmt.Errorf("create registration request: %w", err)
+		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	if err := config.SaveEnrollment(configPath, apiURL, result.AgentCredential); err != nil {
+		return "", errors.New("enrollment confirmed, but saving config failed; preserve the pending file and rerun install to recover without another token")
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("contact control plane: %w", err)
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusCreated:
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "", ErrInvalidToken
-	case http.StatusConflict:
-		return "", ErrAlreadyRegistered
-	default:
-		return "", fmt.Errorf("registration failed (HTTP %d)", resp.StatusCode)
+	if result.Overrides != nil {
+		if err := config.SaveDashboardOverrides(configPath, *result.Overrides); err != nil {
+			return "", err
+		}
 	}
 
-	var result registrationResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
-		return "", errors.New("control plane returned an invalid registration response")
+	if err := config.ClearPendingEnrollment(configPath); err != nil {
+		return "", errors.New("enrollment saved, but pending file cleanup failed; check local directory permissions")
 	}
 
-	if strings.TrimSpace(result.AgentCredential) == "" || strings.ContainsAny(result.AgentCredential, "\r\n") {
-		return "", errors.New("control plane did not return a valid agent credential")
-	}
 	return result.AgentCredential, nil
 }
 
-func ValidateAPIURL(apiURL string) error {
-	base, err := url.Parse(apiURL)
-	if err != nil || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		return errors.New("API URL must be an HTTPS base URL without credentials, query, or fragment")
+func Recover(ctx context.Context, configPath, apiURL, version string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	if base.Scheme != "https" && !(base.Scheme == "http" && isLoopback(base.Hostname())) {
-		return errors.New("API URL must use HTTPS (HTTP is allowed only on loopback for local development)")
+
+	if _, err := os.Lstat(config.ResolvePath(configPath)); err == nil {
+		return false, errors.New("config already exists; recovery will not overwrite it")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, errors.New("cannot check config before recovery")
 	}
-	return nil
+
+	pending, err := config.LoadPendingEnrollment(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pending.APIURL != apiURL {
+		return false, errors.New("pending enrollment uses a different API URL; do not replace it")
+	}
+
+	client, err := controlplane.New(apiURL, pending.Credential, version, nil)
+	if err != nil {
+		return false, err
+	}
+
+	var overrides *config.DashboardOverrides
+	client.OnOverrides = func(_ context.Context, value config.DashboardOverrides) error { overrides = &value; return nil }
+	err = client.Heartbeat(ctx, controlplane.State{Status: controlplane.Error, Problem: controlplane.SetupIncomplete})
+	if errors.Is(err, controlplane.ErrCredentialRejected) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if err := config.SaveEnrollment(configPath, apiURL, pending.Credential); err != nil {
+		return false, errors.New("issued pending credential was confirmed, but saving config failed; preserve the pending file and retry")
+	}
+
+	if overrides != nil {
+		if err := config.SaveDashboardOverrides(configPath, *overrides); err != nil {
+			return false, err
+		}
+	}
+
+	if err := config.ClearPendingEnrollment(configPath); err != nil {
+		return false, errors.New("recovered enrollment saved, but pending file cleanup failed")
+	}
+
+	return true, nil
 }
 
-func isLoopback(host string) bool {
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
-}
+func ValidateAPIURL(apiURL string) error { return controlplane.ValidateAPIURL(apiURL) }

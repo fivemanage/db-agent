@@ -1,21 +1,24 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fivemanage/db-agent/internal/securefile"
 )
 
 func TestLoadAgentBeforeDatabaseSetup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("agent_credential: dac_test\napi_url: https://api.example.com\n"), 0600); err != nil {
+	if err := securefile.Create(path, []byte("agent_credential: dac_test\napi_url: https://api.example.com\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	settings, err := LoadAgent(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if settings.AgentCredential != "dac_test" || !settings.AutoUpdate {
 		t.Fatalf("LoadAgent() = %+v", settings)
 	}
@@ -23,9 +26,10 @@ func TestLoadAgentBeforeDatabaseSetup(t *testing.T) {
 
 func TestLoadUpdateBeforeEnrollment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("update_url: https://releases.example.com/{os}-{arch}.json\n"), 0600); err != nil {
+	if err := securefile.Create(path, []byte("update_url: https://releases.example.com/{os}-{arch}.json\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	settings, err := LoadUpdate(path)
 	if err != nil || settings.UpdateURL == "" {
 		t.Fatalf("LoadUpdate() = %+v, %v", settings, err)
@@ -35,9 +39,10 @@ func TestLoadUpdateBeforeEnrollment(t *testing.T) {
 func TestLoadAgentRejectsInsecureUpdateURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	input := "agent_credential: dac_test\napi_url: https://api.example.com\nupdate_url: http://updates.example.com/{os}-{arch}.json\n"
-	if err := os.WriteFile(path, []byte(input), 0600); err != nil {
+	if err := securefile.Create(path, []byte(input)); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := LoadAgent(path); err == nil || !strings.Contains(err.Error(), "update_url must use HTTPS") {
 		t.Fatalf("LoadAgent() error = %v, want HTTPS update URL error", err)
 	}
@@ -51,6 +56,8 @@ database:
   password: secret
 encryption:
   key_file: /etc/db-agent/encryption.key
+  key_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  key_acknowledged: true
 `
 
 func TestLoadReaderAppliesDefaults(t *testing.T) {
@@ -119,6 +126,7 @@ auto_update: false
 	if err != nil {
 		t.Fatalf("LoadReader() error = %v", err)
 	}
+
 	if config.Backup.ThrottleIO {
 		t.Error("Backup.ThrottleIO = true, want false")
 	}
@@ -178,6 +186,7 @@ func TestWithDashboardOverrides(t *testing.T) {
 	compression := "gzip"
 	throttleIO := false
 	autoUpdate := false
+
 	effective, err := local.WithDashboardOverrides(DashboardOverrides{
 		Backup: BackupOverrides{
 			Schedule:      &schedule,
@@ -206,6 +215,7 @@ func TestWithDashboardOverridesRejectsInvalidConfig(t *testing.T) {
 	}
 
 	compression := "zip"
+
 	_, err = local.WithDashboardOverrides(DashboardOverrides{
 		Backup: BackupOverrides{Compression: &compression},
 	})

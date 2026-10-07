@@ -15,7 +15,14 @@ The agent checks `GET <api_url>/v1/agent/updates?os=<goos>&arch=<goarch>&current
 
 The release artifact URL must be stable HTTPS. Release signing uses an offline Ed25519 private key; the agent pins the matching public key at build time. The signature covers the version, OS, architecture, URL, and checksum. The agent refuses an invalid signature, wrong platform, non-HTTPS URL, checksum mismatch, or downgrade. The release feed cannot select a different signing key.
 
-`db-agent update check` and `db-agent update now` can read a config containing only `update_url`; they do not need enrollment or database credentials. A standalone `update now` replaces the binary without launching an agent. Automatic checks run when `db-agent agent` starts with `auto_update: true`.
+`db-agent update check` and `db-agent update now` can read a config containing only `update_url`; they do not need enrollment or database credentials. A standalone `update now` replaces the binary without launching an agent. Automatic checks run when `db-agent agent` or the installed Windows/systemd service starts with `auto_update: true`.
+
+Automatic checks start after the initial heartbeat attempt and run in
+an independent worker, so a slow release check/download cannot stall heartbeats.
+A rejected initial agent credential stops the process without starting that
+worker. A transient heartbeat outage does not disable the public signed feed.
+Update handoff cancels and joins the heartbeat worker before the process exits;
+manifest verification, replacement, and rollback behavior are unchanged.
 
 ## Release setup
 
@@ -49,6 +56,6 @@ The control plane may serve the signed JSON verbatim, or the files may be hosted
 
 The agent downloads a verified executable beside its installed binary. A separate copy of the old binary then waits for the agent to exit, replaces it, and restarts it. On Windows, replacement uses `ReplaceFileW` with a rollback copy. On Unix, the staged binary is renamed over the installed one with a rollback copy retained. If restart fails, the helper restores the old executable and tries to start it again. The rollback copy stays until the next successful update attempt.
 
-An installed service should set `DB_AGENT_SERVICE_NAME` to its OS service name. The helper then uses `sc.exe` on Windows or `systemctl` on Linux. On Linux it launches in a transient systemd unit so stopping the agent unit does not kill the updater. Without that environment variable, the helper restarts `db-agent agent` as a foreground child.
+The installed Windows/systemd service sets `DB_AGENT_SERVICE_NAME=db-agent`. The helper then uses `sc.exe` on Windows or `systemctl` on Linux. On Linux it launches in a transient systemd unit so stopping the agent unit does not kill the updater. Without that environment variable, the helper restarts `db-agent agent` as a foreground child. Launchd automatic updates are disabled: its helper cannot restart a service yet. Stop that service and update the binary manually instead.
 
-The release endpoint, production signing key, release publishing, service installation, and live Windows validation are still required before this can be called an unattended production update system. The current `dev` binary intentionally skips automatic checks.
+The release endpoint, production signing key, release publishing, and live Windows/systemd update validation are still required before this can be called an unattended production update system. The current `dev` binary intentionally skips automatic checks.

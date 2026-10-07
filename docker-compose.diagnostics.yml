@@ -1,0 +1,29 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: diagnostics_root
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - ./db/diagnostics/common.sql:/docker-entrypoint-initdb.d/01-common.sql:ro
+      - ./db/diagnostics/mariadb.sql:/docker-entrypoint-initdb.d/02-grants.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: diagnostics_root
+    ports:
+      - "127.0.0.1:13307:3306"
+    volumes:
+      - ./db/diagnostics/common.sql:/docker-entrypoint-initdb.d/01-common.sql:ro
+      - ./db/diagnostics/mysql.sql:/docker-entrypoint-initdb.d/02-grants.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdiagnostics_root"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

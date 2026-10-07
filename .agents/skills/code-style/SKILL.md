@@ -6,6 +6,7 @@ description: Apply db-agent Go conventions when writing or reviewing Go code, in
 # Go code style
 
 - Use `gofmt` and `go vet`. Follow the naming and import conventions of the surrounding Go package. Avoid package stutter such as `config.ConfigSettings`.
+- Use a single blank line between logical steps, such as validation, setup, work, and the final return. In tests, separate setup, execution, and assertions. Keep closely related statements together, especially an assignment and its error check or resource acquisition and its cleanup registration. Do not add blank lines between every statement or just inside braces; `gofmt` preserves logical spacing but does not add it for you.
 - Keep functions small and explicit. Return values and errors rather than hiding failures in global state. Add interfaces where a consumer or a test needs a boundary, not in anticipation of one.
 - Wrap lower-level errors with `%w` and enough operation context to diagnose them. Use `errors.Is` or `errors.As` when checking wrapped errors; do not compare error text.
 - Pass `context.Context` through cancelable network and long-running work. Close response bodies and files, and clean up partial downloads or temporary output on errors.

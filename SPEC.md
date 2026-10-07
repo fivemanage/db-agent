@@ -119,8 +119,8 @@ database:
   port: 3306
   user: "db_agent_backup"
   password: "<generated>"
-  # If empty, back up all databases the user can see.
-  # Most users will have one game database.
+  # Explicitly confirmed scope; an empty list is incomplete setup.
+  # System databases are excluded from this logical backup path.
   databases: ["es_extended"]
 
 backup:
@@ -133,6 +133,8 @@ encryption:
   # Key is generated at install time and shown ONCE to the user.
   # Agent stores it locally. Control plane never sees it.
   key_file: "C:\\ProgramData\\db-agent\\encryption.key"
+  # Setup also writes key_id (SHA-256 fingerprint) and key_acknowledged.
+  # Do not invent these fields or bypass recovery-copy confirmation.
 ```
 
 **Config file permissions must be restrictive** (0600 equivalent / Administrators
@@ -156,12 +158,54 @@ Authorization: Bearer <enrollment token>
 }
 ```
 
+The safe retry protocol first discovers `registration_protocol:
+"client-credential-v1"` using unauthenticated `GET /v1/agent/register`. Its POST
+also contains `agent_credential`, a locally generated 256-bit `dac_` candidate.
+The agent protects this candidate in `<config path>.enrollment-pending` before
+the exchange and never persists the enrollment token. The server stores only
+the candidate hash, atomically binds the consumed token to the issued agent,
+and accepts a replay only with the same consumed token and matching active
+candidate. Different candidates, expired/revoked enrollment tokens, and revoked
+agents/credentials cannot replay. Legacy requests without a candidate remain
+one-shot; a new client refuses legacy capability responses before sending a token.
+
+After a lost response/process restart, setup probes the pending credential with
+heartbeat to confirm an already-issued enrollment without another setup token.
+An unissued candidate requires the original token to continue with the same
+candidate. Recovery never overwrites an existing config/key or rotates secrets.
+Successful recovery saves config and removes pending state.
+
 Database driver and version are reported later, after local DB setup. Response
 confirms the binding, returns the agent credential, and may return
 server-side config overrides (e.g. schedule). The installer persists only the
 agent credential. If the enrollment token is invalid, the agent should fail loudly with a
 clear message — this is the #1 install-time error and the message needs to be
 human-readable, not a stack trace.
+
+Optional `db_driver` (`mysql`/`mariadb`) and numeric `db_version` are accepted on
+registration and heartbeat when known. Hostname is persisted with agent metadata.
+Neither message contains DB connection settings, database names, or key material.
+
+Registration/heartbeat responses may contain `config_overrides`:
+
+```json
+{
+  "config_overrides": {
+    "backup": { "schedule": "0 5 * * *", "retention_days": 7,
+                "compression": "zstd", "throttle_io": true },
+    "auto_update": false
+  }
+}
+```
+
+Only these fields are permitted. Overrides are validated independently of
+unfinished DB/key setup and saved through a private atomic config replacement,
+preserving all local-only and unknown fields. API/update URLs, credentials,
+encryption keys/paths, and update trust cannot be overridden. Unknown override
+fields fail closed; unrelated response-envelope fields are ignored. Schedule
+expressions retain the local-time contract; no remote timezone override is defined.
+Signed-update checks read saved policy before each check; an already authorized
+replacement is not interrupted by a later policy change.
 
 ### 2. Heartbeat (every 60s)
 
@@ -181,6 +225,23 @@ This is deliberately separate from backup reporting. "Is the agent alive" and
 able to answer both independently. A dead agent with a successful backup from
 three days ago should read as *unhealthy*, not healthy.
 
+The foreground and service agent currently send an immediate heartbeat after startup
+diagnostics and polls every 60 seconds on Windows and Unix. Local prerequisite
+failures produce a classified `error` message; raw DB errors, config, encryption
+keys/paths, and diagnostic output never enter the heartbeat payload. The current
+activity comes from a provider so the future backup pipeline can supply
+`backing_up`/`uploading` transitions without changing transport code.
+
+Each poll is bounded to 45 seconds with 15-second HTTP timeouts, up to three
+attempts, and jittered exponential backoff for transport failures, HTTP 429, and
+HTTP 5xx. `Retry-After` cooldowns survive the individual poll budget. Permanent
+HTTP failures, redirects, and malformed responses stop the process; HTTP 401/403
+produce a distinct rejected-credential result and require access recovery rather
+than automatic re-enrollment. Heartbeats run independently of signed-update
+checks. Cancellation and update handoff join the workers before process exit.
+The control plane derives staleness at 180 seconds; a heartbeat does not overwrite
+backup outcomes. Durable runtime state is still planned.
+
 ### 3. Backup run
 
 Triggered by schedule, or on demand (see "Manual trigger" below).
@@ -189,10 +250,12 @@ Steps:
 
 1. Report `status: backing_up` via heartbeat.
 2. Dump the database:
-   - **Preferred:** `mariabackup` / `xtrabackup` if available on PATH (physical
-     backup — much lower load, supports incremental later).
-   - **Fallback:** `mysqldump` with `--single-transaction --quick
-     --routines --triggers --events`.
+   - **Initial path:** `mysqldump` / `mariadb-dump` with `--single-transaction
+      --quick --routines --triggers --events --no-tablespaces`.
+   - **Future preferred path:** `mariabackup` / `xtrabackup` (physical backup —
+      much lower load, supports incremental later), after version compatibility,
+      physical backup privileges, and local filesystem access are validated.
+      Discovery alone must not declare a physical backup ready.
    - Detect which is available at startup and log which one will be used.
 3. Stream the dump through compression (zstd default) and then through
    encryption — **do not** write a large plaintext temp file to disk if it can
@@ -202,11 +265,20 @@ Steps:
 ```
 POST /v1/backups/initiate
 Authorization: Bearer <agent credential>
+Idempotency-Key: <stable per-run identity>
 
 { "estimated_size_bytes": 348000000, "started_at": "..." }
 
 → { "backup_id": "...", "upload_url": "https://...", "expires_at": "..." }
 ```
+
+The agent client defines this contract now; server-side transfer behavior is
+implemented in DEV-514. The orchestrator must persist one CSPRNG-generated
+request identity for each run, reuse it on retry/restart, and never generate a
+new identity for the same initiation. The server must return the same bound
+backup for that identity, rather than creating duplicate records. Unknown size
+estimates are omitted. Responses may use HTTP 200 or 201 and must include an
+unexpired HTTPS upload URL. No object-storage request receives the agent credential.
 
 5. `PUT` the encrypted stream to `upload_url`.
 6. Report completion:
@@ -225,6 +297,13 @@ Authorization: Bearer <agent credential>
 ```
 
 7. Report `status: idle`.
+
+Completion is idempotent for identical terminal metadata; conflicting outcomes
+must be rejected rather than overwriting history. Successful completion requires
+a nonnegative encrypted size/duration and `sha256:<64 lowercase hex digits>`.
+Failed completion uses classified safe errors, never raw dump/DB/network output.
+Resource IDs are bounded opaque alphanumeric/underscore/hyphen strings; they
+cannot inject paths. A successful completion response is HTTP 200 with `{}`.
 
 ### 4. Manual trigger
 
@@ -267,6 +346,29 @@ failing to back up.
 - Control plane must never receive or store the key. This is both a genuine
   security property and a strong marketing point — say it plainly in the docs.
 
+Key lifecycle is implemented independently of the future backup artifact format.
+The local/recovery encoding is `dbak1_` plus the canonical 43-character unpadded
+base64url encoding of 32 CSPRNG bytes; the private file adds a trailing newline.
+Config contains only the absolute key path, SHA-256 fingerprint, and acknowledgement.
+Key setup defaults to `encryption.key` beside config, resolving existing relative
+key paths against that directory. Unix uses `0600`; Windows uses a protected
+System/Administrators DACL. Config/key readers reject unsafe permissions, links,
+nonregular files, and oversized data. New files are privately staged and synced
+before no-overwrite publication; config changes preserve unrelated settings via
+private atomic replacement. Existing key material is never rotated on retry.
+
+`install` and `configure --key` use an interactive, unredirected terminal. The
+new key is shown once directly to the terminal, then the user must paste the saved
+copy through hidden input and type `SAVED`. Terminal recording/transcripts must
+be disabled. An existing file consumes the display opportunity, including a crash
+before/after display or a failed terminal write; retries require confirmation from
+the original saved copy without redisplay. If the display was lost, a local admin
+must copy the protected key file to offline storage and confirm that copy. A
+configured missing, malformed, unsafe, or fingerprint-mismatched key blocks setup
+without generating a replacement. No key contents, admin credentials, or imported
+connection strings enter config, logs, errors, or control-plane messages. Only the
+tested scoped DB account is persisted in local config.
+
 Consider offering an optional "escrow the key with us" mode later for users who
 would rather trade zero-knowledge for not-losing-their-key. **Not in the MVP.**
 
@@ -285,6 +387,13 @@ db-agent restore --backup-id <id> --output ./restore.sql
 
 - Downloads the encrypted backup (via a presigned download URL from the control
   plane), decrypts it locally with the key file, decompresses it.
+
+The typed lookup contract is authenticated `GET /v1/backups/{id}/download`,
+returning HTTP 200 with `{ "download_url": "https://...", "expires_at": "..." }`.
+The URL must be unexpired HTTPS without userinfo/fragment. Lookup and transfer are
+separate: the client does not fetch or forward agent credentials to the returned
+URL. Object-storage ownership, download issuance, and expired-URL renewal are
+server-side DEV-514 work; decryption/output are DEV-499 work.
 - Writes the plain dump to disk.
 - Prints the exact command the user should run to import it, e.g.
   `mysql -u root -p dbname < restore.sql`.
@@ -307,11 +416,29 @@ db-agent status           # local status: last backup, next scheduled, agent hea
 db-agent backup --now     # trigger a backup immediately
 db-agent restore --backup-id <id> --output <path>
 db-agent test             # verify DB connectivity + API reachability, print result
+db-agent configure        # connect an already-enrolled agent and confirm DB scope
 db-agent version
 ```
 
 `db-agent test` is worth building early. It turns "it's not working" support
 tickets into self-diagnosis.
+
+The current cross-platform setup wizard enrolls before DB setup and can resume
+using the issued agent credential. It accepts a hidden game-server connection
+string or manual local TCP settings, confirms the selected application database,
+and tests the connection before changing SQL or saving database settings. With
+direct account-creation permission it offers the scoped SQL below for explicit
+approval, then verifies the generated account before saving. Otherwise it accepts
+a confirmed existing backup account, but refuses root/detected admin accounts.
+Existing accounts are never altered. Setup generates/confirms the key and
+installs/starts the service only after diagnostics pass; it still does not run the first backup and
+reports that limitation rather than presenting registration as a working backup.
+
+The current diagnostic checks config, DB reachability/authentication, numeric
+server version, explicit scope, direct logical dump grants, compatible client
+tooling, local key format/private permissions/fingerprint/acknowledgement, and
+unauthenticated API host reachability independently. It does not execute a backup or verify
+agent authentication. See `README.md` for requirements and local fixtures.
 
 ---
 
@@ -325,6 +452,27 @@ logged-in session (essential for VPS users).
   from one codebase, which is exactly the cross-platform need here.
 - **Linux:** systemd unit.
 - **macOS:** launchd (low priority — very few users, but free via the same lib).
+
+The shared runtime now uses `kardianos/service` with service name `db-agent`.
+`install --service-only` registers and starts an already-enrolled agent without
+repeating setup; incomplete DB/key prerequisites are reported by heartbeat, not
+treated as backup readiness. Normal installation gates service registration on
+the existing diagnostics. Install/start/stop/uninstall are idempotent and require
+Administrator/root permissions. Installation captures absolute binary/config
+paths and uses Windows automatic startup, systemd enablement, and launchd
+`RunAtLoad`; an existing registration is never silently rebound on reinstall.
+
+The service runs as LocalSystem on Windows or root on Unix. Registration remains
+a one-time setup exchange, not a runtime worker. Diagnostics, heartbeats, and
+signed-update checks run beneath one cancellable lifecycle. Stop and Windows
+machine shutdown wait for workers and reverse-order cleanup hooks, with a
+15-second stop budget. Hooks get a fresh bounded context for resource cleanup;
+future backup workers must respond to cancellation and join before returning.
+Terminal worker failures and update handoff also terminate the service host.
+Uninstall stops the service and removes only its registration, preserving config,
+pending enrollment, keys, backups, and logs. Service-manager logs are wired;
+rotating local file logs and live OS/reboot validation remain pending. Launchd
+automatic updates are disabled until the updater supports its restart path.
 
 ### Install flow (Windows — the primary target)
 
@@ -366,11 +514,30 @@ asking the user to understand GRANT syntax:
 
 ```sql
 CREATE USER 'db_agent_backup'@'localhost' IDENTIFIED BY '<generated>';
-GRANT SELECT, LOCK TABLES, RELOAD, REPLICATION CLIENT, PROCESS,
-      SHOW VIEW, EVENT, TRIGGER
-  ON *.* TO 'db_agent_backup'@'localhost';
-FLUSH PRIVILEGES;
+GRANT SELECT, SHOW VIEW, EVENT, TRIGGER
+  ON `<confirmed_database>`.* TO 'db_agent_backup'@'localhost';
+-- MySQL 8.0.20+ routine visibility:
+GRANT SHOW_ROUTINE ON *.* TO 'db_agent_backup'@'localhost';
 ```
+
+Repeat the schema grant only for the confirmed application databases. For
+database-level GRANT patterns, escape `_` and `%` in schema names so they cannot
+grant access to similarly named databases. Do not use `CREATE USER IF NOT EXISTS`
+or reset the password of a pre-existing account when retrying setup.
+
+The shared local-TCP wizard also creates a `db_agent_backup` identity for the
+selected loopback IP (`127.0.0.1` or `::1`) with the same password and grants.
+Linux MariaDB and MySQL with name resolution disabled do not necessarily map
+local TCP to `@localhost`. `localhost` input uses IPv4 TCP; no wildcard-host or
+remote-host account is created. Both identities are displayed for approval and
+only identities confirmed created by the current attempt are removed on failure.
+
+For MariaDB and MySQL 5.7, use `SELECT ON mysql.proc` for routine visibility instead;
+MariaDB 11.3+ also supports global `SHOW CREATE ROUTINE`. Physical backups need
+a separate, version-specific privilege and filesystem check. The initial
+logical path must not request global `SELECT`, `PROCESS`, table locks, or
+physical-backup privileges when narrower grants suffice. `CREATE USER`/`GRANT`
+take effect without `FLUSH PRIVILEGES`.
 
 Print exactly what it's about to do and ask for confirmation. If the user
 declines, fall back to asking them to supply credentials manually and document

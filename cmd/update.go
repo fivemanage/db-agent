@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,11 +23,13 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 	if err != nil {
 		return update.Client{}, err
 	}
+
 	manifestURL := settings.UpdateURL
 	if manifestURL == "" {
 		manifestURL = strings.TrimRight(settings.APIURL, "/") + "/v1/agent/updates"
 	}
 	manifestURL = strings.ReplaceAll(strings.ReplaceAll(manifestURL, "{os}", runtime.GOOS), "{arch}", runtime.GOARCH)
+
 	return update.Client{
 		PublicKey:   key,
 		Version:     version,
@@ -35,14 +38,20 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 }
 
 func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, restartAgent bool) (bool, error) {
+	if install && runtime.GOOS == "darwin" && os.Getenv("DB_AGENT_SERVICE_NAME") != "" {
+		return false, errors.New("signed updates cannot restart a launchd service yet; stop the service and update manually")
+	}
+
 	client, err := newUpdateClient(settings)
 	if err != nil {
 		return false, err
 	}
+
 	manifest, available, err := client.Check(ctx)
 	if err != nil || !available || !install {
 		return available, err
 	}
+
 	executablePath, err := os.Executable()
 	if err != nil {
 		return false, err
@@ -51,10 +60,12 @@ func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, 
 	if err != nil {
 		return false, err
 	}
+
 	stagedPath, err := client.Stage(ctx, manifest, executablePath)
 	if err != nil {
 		return false, err
 	}
+
 	serviceName := os.Getenv("DB_AGENT_SERVICE_NAME")
 	if err := update.LaunchHelper(executablePath, stagedPath, manifest.SHA256, manifest.Version, update.Restart{
 		ServiceName: serviceName,
@@ -64,6 +75,7 @@ func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, 
 		os.Remove(stagedPath)
 		return false, err
 	}
+
 	return true, nil
 }
 
@@ -78,6 +90,7 @@ var updateCheckCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
 		available, err := checkAndMaybeInstall(cmd.Context(), settings, false, false)
 		if err != nil {
 			return err
@@ -87,6 +100,7 @@ var updateCheckCmd = &cobra.Command{
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Agent is up to date.")
 		}
+
 		return nil
 	},
 }
@@ -100,6 +114,7 @@ var updateNowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
 		available, err := checkAndMaybeInstall(cmd.Context(), settings, true, false)
 		if err != nil {
 			return err
@@ -109,6 +124,7 @@ var updateNowCmd = &cobra.Command{
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Agent is up to date.")
 		}
+
 		return nil
 	},
 }
@@ -124,6 +140,7 @@ var updateHelperCmd = &cobra.Command{
 		if err := update.RunHelper(helperTarget, helperStaged, helperSHA, helperVersion, update.Restart{ServiceName: helperService, ConfigPath: helperConfig, NoRestart: helperNoRestart}); err != nil {
 			return err
 		}
+
 		return nil
 	},
 }

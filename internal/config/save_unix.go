@@ -2,8 +2,16 @@
 
 package config
 
-import "os"
+import (
+	"os"
+
+	"github.com/fivemanage/db-agent/internal/securefile"
+)
 
 func createPrivateFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	return securefile.OpenNew(path)
+}
+
+func replacePrivateFile(from, to string) error {
+	return securefile.Replace(from, to)
 }

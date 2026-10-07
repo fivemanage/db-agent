@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
+	"github.com/fivemanage/db-agent/internal/securefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,33 +30,11 @@ func SaveEnrollment(path, apiURL, credential string) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-
-	file, err := createPrivateFile(path)
-	if err != nil {
+	if err := securefile.Create(path, contents); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("config already exists at %s; enrollment will not overwrite it", path)
 		}
 		return fmt.Errorf("create private config: %w", err)
-	}
-
-	if _, err := file.Write(contents); err != nil {
-		file.Close()
-		os.Remove(path)
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	if err := file.Sync(); err != nil {
-		file.Close()
-		os.Remove(path)
-		return fmt.Errorf("sync config: %w", err)
-	}
-
-	if err := file.Close(); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("close config: %w", err)
 	}
 
 	return nil
