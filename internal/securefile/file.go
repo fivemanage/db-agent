@@ -49,6 +49,25 @@ func Create(path string, contents []byte) error {
 }
 
 func Read(path string, maxBytes int64) ([]byte, error) {
+	file, err := Open(path, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > maxBytes {
+		return nil, ErrUnsafe
+	}
+
+	return contents, nil
+}
+
+// Open validates a private regular file without reading its contents into memory.
+func Open(path string, maxBytes int64) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -61,24 +80,17 @@ func Read(path string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() > maxBytes {
+		file.Close()
 		return nil, ErrUnsafe
 	}
 
 	if err := checkPermissions(file); err != nil {
+		file.Close()
 		return nil, err
 	}
 
-	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(contents)) > maxBytes {
-		return nil, ErrUnsafe
-	}
-
-	return contents, nil
+	return file, nil
 }

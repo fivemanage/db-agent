@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/fivemanage/db-agent/internal/securefile"
 	"github.com/robfig/cron/v3"
@@ -16,6 +17,8 @@ import (
 )
 
 const PathEnvironmentVariable = "DB_AGENT_CONFIG"
+
+const DefaultDumpTimeout = 2 * time.Hour
 
 type Config struct {
 	AgentCredential string           `mapstructure:"agent_credential" yaml:"agent_credential"`
@@ -41,6 +44,7 @@ type BackupConfig struct {
 	RetentionDays int    `mapstructure:"retention_days" yaml:"retention_days"`
 	Compression   string `mapstructure:"compression" yaml:"compression"`
 	ThrottleIO    bool   `mapstructure:"throttle_io" yaml:"throttle_io"`
+	DumpTimeout   string `mapstructure:"dump_timeout" yaml:"dump_timeout,omitempty"`
 }
 
 type EncryptionConfig struct {
@@ -214,8 +218,23 @@ func (c BackupConfig) Validate() error {
 	if c.Compression != "zstd" && c.Compression != "gzip" {
 		return errors.New("backup compression must be zstd or gzip")
 	}
+	if _, err := c.DumpDuration(); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// DumpDuration also supplies the default for programmatically constructed configs.
+func (c BackupConfig) DumpDuration() (time.Duration, error) {
+	if c.DumpTimeout == "" {
+		return DefaultDumpTimeout, nil
+	}
+	duration, err := time.ParseDuration(c.DumpTimeout)
+	if err != nil || duration <= 0 {
+		return 0, errors.New("backup dump_timeout must be a positive duration such as 30m or 2h")
+	}
+	return duration, nil
 }
 
 func (c DatabaseConfig) Validate() error {
@@ -301,6 +320,7 @@ func newViper() *viper.Viper {
 	v.SetDefault("backup.retention_days", 7)
 	v.SetDefault("backup.compression", "zstd")
 	v.SetDefault("backup.throttle_io", true)
+	v.SetDefault("backup.dump_timeout", "2h")
 	v.SetDefault("auto_update", true)
 
 	// this should be a build variable

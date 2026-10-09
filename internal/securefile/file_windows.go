@@ -102,3 +102,7 @@ func move(from, to string, flags uint32) error {
 
 func publish(from, to string) error { return move(from, to, 0) }
 func Replace(from, to string) error { return move(from, to, windows.MOVEFILE_REPLACE_EXISTING) }
+
+func ReplaceDurable(from, to string) error {
+	return Replace(from, to)
+}

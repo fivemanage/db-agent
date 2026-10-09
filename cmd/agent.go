@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/fivemanage/db-agent/internal/diagnostic"
+	"github.com/fivemanage/db-agent/internal/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -67,9 +69,21 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 		return config.SaveDashboardOverrides(path, overrides)
 	}
 
+	options := transfer.Options{}
+	if settings.Backup.ThrottleIO {
+		options.BytesPerSecond = 4 << 20
+	}
+
+	uploader, err := transfer.New(filepath.Join(filepath.Dir(path), "backup-transfer"), client, options)
+	if err != nil {
+		return err
+	}
+
 	return runAgent(ctx, output, errorOutput, agentWork{
 		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
-			return client.RunHeartbeat(ctx, func() controlplane.State { return state }, report)
+			return runHeartbeatTransfers(ctx, func(ctx context.Context, report func(controlplane.Result)) error {
+				return client.RunHeartbeat(ctx, func() controlplane.State { return state }, report)
+			}, uploader.Resume, report, errorOutput)
 		},
 		update: func(ctx context.Context) (bool, error) {
 			effective, err := config.LoadAgent(path)

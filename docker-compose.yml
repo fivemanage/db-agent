@@ -1,6 +1,11 @@
 services:
   mariadb:
     image: mariadb:11.4
+    command:
+      - --performance-schema=ON
+      - --performance-schema-instrument=statement/%=ON
+      - --performance-schema-consumer-events-statements-current=ON
+      - --performance-schema-consumer-statements-digest=ON
     container_name: db-agent-mariadb
     restart: unless-stopped
     environment:

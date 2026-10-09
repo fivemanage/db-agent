@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fivemanage/db-agent/internal/securefile"
 )
@@ -87,6 +88,9 @@ func TestLoadReaderAppliesDefaults(t *testing.T) {
 	if !config.Backup.ThrottleIO {
 		t.Error("Backup.ThrottleIO = false, want true")
 	}
+	if duration, err := config.Backup.DumpDuration(); err != nil || duration != 2*time.Hour {
+		t.Fatalf("DumpDuration() = %v, %v", duration, err)
+	}
 	if !config.AutoUpdate {
 		t.Error("AutoUpdate = false, want true")
 	}
@@ -103,6 +107,9 @@ func TestLoadReaderValidatesConfig(t *testing.T) {
 		{name: "invalid driver", config: strings.Replace(minimalConfig, "database:\n", "database:\n  driver: postgres\n", 1), wantErr: "database driver must be mysql or mariadb"},
 		{name: "invalid schedule", config: minimalConfig + "backup:\n  schedule: sometimes\n", wantErr: "backup schedule must be a valid five-field cron expression"},
 		{name: "invalid compression", config: minimalConfig + "backup:\n  compression: zip\n", wantErr: "backup compression must be zstd or gzip"},
+		{name: "invalid dump timeout", config: minimalConfig + "backup:\n  dump_timeout: private-invalid-value\n", wantErr: "backup dump_timeout must be a positive duration"},
+		{name: "zero dump timeout", config: minimalConfig + "backup:\n  dump_timeout: 0s\n", wantErr: "backup dump_timeout must be a positive duration"},
+		{name: "negative dump timeout", config: minimalConfig + "backup:\n  dump_timeout: -1s\n", wantErr: "backup dump_timeout must be a positive duration"},
 	}
 
 	for _, test := range tests {
@@ -112,6 +119,22 @@ func TestLoadReaderValidatesConfig(t *testing.T) {
 				t.Fatalf("LoadReader() error = %v, want error containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestDumpDuration(t *testing.T) {
+	c, err := LoadReader(strings.NewReader(minimalConfig + "backup:\n  dump_timeout: 30m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duration, err := c.Backup.DumpDuration(); err != nil || duration != 30*time.Minute {
+		t.Fatalf("DumpDuration() = %v, %v", duration, err)
+	}
+	if duration, err := (BackupConfig{}).DumpDuration(); err != nil || duration != DefaultDumpTimeout {
+		t.Fatalf("default DumpDuration() = %v, %v", duration, err)
+	}
+	if _, err := (BackupConfig{DumpTimeout: "private-invalid-value"}).DumpDuration(); err == nil || strings.Contains(err.Error(), "private-invalid-value") {
+		t.Fatal("invalid timeout accepted or echoed")
 	}
 }
 

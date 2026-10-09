@@ -6,6 +6,17 @@ foreground/service heartbeats, and signed update support exist. Scheduled backup
 and uploads are not implemented yet. A passing diagnostic or running service does
 not mean a backup exists.
 
+The streaming backup codec is implemented in `internal/artifact`: zstd (default)
+or gzip, locally encrypted with chunked AES-256-GCM, with encrypted size/SHA-256
+metadata and restore decoding. The CLI does not run this pipeline yet. See
+[ARTIFACT.md](ARTIFACT.md) for the versioned format, security constraints, and
+future upload/restore integration.
+
+The scoped logical dump executor is implemented in `internal/dump`, with private
+client credentials, timeouts, process-tree cancellation, and output throttling.
+It is not yet wired into `backup --now`. See [DUMP.md](DUMP.md) for its contract,
+consistency limits, and real MySQL/MariaDB integration tests.
+
 ## Register and connect
 
 ```sh
@@ -101,9 +112,9 @@ configured key paths are resolved against the config directory during key setup
 and saved as absolute paths. Each key is 32 bytes from Go's cryptographic RNG.
 Its portable recovery/file format is one ASCII line: `dbak1_` followed by the
 43-character, unpadded base64url encoding of those 32 bytes, with a trailing
-newline in the file. The prefix versions key encoding only; backup artifact
-compression/encryption remains DEV-493 work. Arbitrary old placeholder files are
-not valid keys and are never automatically overwritten.
+newline in the file. The prefix versions key encoding only; the separate backup
+artifact format is documented in [ARTIFACT.md](ARTIFACT.md). Arbitrary old
+placeholder files are not valid keys and are never automatically overwritten.
 
 Files are staged privately, synced, and published without replacing an existing
 destination. Config/pending-enrollment files use the same safe creation primitive;
@@ -278,8 +289,8 @@ for the exact contracts.
 
 ### Logical dump prerequisites
 
-The planned logical dump uses `--single-transaction --quick --routines
---triggers --events --no-tablespaces`. This avoids table locking and the global
+The logical dump executor uses `--single-transaction --quick --routines
+--triggers --events --no-tablespaces --skip-lock-tables`. This avoids table locking and the global
 `PROCESS` grant needed for tablespace metadata. For each selected database the
 backup account needs `SELECT`, `SHOW VIEW`, `TRIGGER`, and `EVENT` privileges.
 Routine visibility also needs one of:
@@ -292,6 +303,11 @@ Grants are checked conservatively using the current account's direct grants.
 Role-only, table-only, and wildcard-schema grants are not accepted by this first
 diagnostic; ask a local administrator for direct grants on the exact selected
 schemas. Do not use root as the persisted backup account.
+
+The lock-free snapshot covers InnoDB, not nontransactional tables or concurrent
+DDL. The local `backup.dump_timeout` defaults to `2h` and accepts positive values
+such as `30m`. When enabled, output throttling defaults to 4 MiB/s. See
+[DUMP.md](DUMP.md) for process lifetime and credential-file handling.
 
 Install matching **MySQL client utilities** (`mysqldump`; Linux packages
 `mysql-client`/`mysql-community-client`) or **MariaDB client tools**

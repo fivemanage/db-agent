@@ -48,3 +48,11 @@ func publish(from, to string) error {
 func Replace(from, to string) error {
 	return os.Rename(from, to)
 }
+
+func ReplaceDurable(from, to string) error {
+	if err := Replace(from, to); err != nil {
+		return err
+	}
+
+	return syncDirectory(to)
+}
