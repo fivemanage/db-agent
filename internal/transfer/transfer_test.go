@@ -561,6 +561,19 @@ func TestFreeSpaceReservePreventsWrites(t *testing.T) {
 	}
 }
 
+func TestFreeSpaceIsRecheckedAsDiskHeadroomDrops(t *testing.T) {
+	var output bytes.Buffer
+	available := uint64(100)
+	w := &limitedWriter{dst: &output, remaining: 100, reserve: 90, free: func() (uint64, error) { return available, nil }}
+	if _, err := w.Write(make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	available = 92
+	if n, err := w.Write(make([]byte, 5)); n != 0 || !errors.Is(err, ErrLimit) || output.Len() != 5 {
+		t.Fatal("a later write consumed the free-space reserve")
+	}
+}
+
 func TestExpiredArtifactBecomesFailedReportWithoutUpload(t *testing.T) {
 	p := &fakePlane{
 		initiateError: &controlplane.ResponseError{StatusCode: 503},

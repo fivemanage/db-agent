@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/fivemanage/db-agent/internal/backup"
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/transfer"
 )
@@ -66,12 +67,12 @@ func runHeartbeatTransfers(
 					done <- nil
 					return
 				}
-				if errors.Is(err, controlplane.ErrCredentialRejected) || errors.Is(err, transfer.ErrLocal) {
+				if errors.Is(err, controlplane.ErrCredentialRejected) || errors.Is(err, transfer.ErrLocal) || errors.Is(err, backup.ErrState) {
 					done <- err
 					return
 				}
 
-				if err != nil && !errors.Is(err, transfer.ErrBusy) {
+				if err != nil && !errors.Is(err, transfer.ErrBusy) && !errors.Is(err, backup.ErrRunning) {
 					fmt.Fprintln(output, "Backup transfer remains queued or failed; check local backup status.")
 				}
 			}

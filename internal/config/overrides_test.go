@@ -38,6 +38,7 @@ func TestOverridesRejectSecretInjectionAndBadPolicyWithoutEchoingValues(t *testi
 	for _, input := range []string{
 		`{"agent_credential":"private-value"}`, `{"database":{"password":"private-value"}}`, `{"encryption":{"key_file":"private-value"}}`, `{"update_url":"private-value"}`, `{"backup":{"password":"private-value"}}`, `{"backup":{"schedule":"private-value"}}`, `{"backup":{"compression":"private-value"}}`, `{"backup":{"retention_days":0}}`, `{"auto_update":"private-value"}`,
 		`{"backup":{"dump_timeout":"private-value"}}`,
+		`{"backup":{"schedule":"CRON_TZ=UTC 0 4 * * *"}}`, `{"backup":{"schedule":"TZ=UTC 0 4 * * *"}}`, `{"backup":{"schedule":"@daily"}}`,
 	} {
 		_, err := DecodeDashboardOverrides([]byte(input))
 		if err == nil || strings.Contains(err.Error(), "private-value") {

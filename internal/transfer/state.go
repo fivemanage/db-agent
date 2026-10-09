@@ -122,6 +122,7 @@ func (u *Uploader) save(e *entry) error {
 	if err := securefile.Create(staged, data); err != nil {
 		return &safeError{ErrLocal, err}
 	}
+	defer remove(staged)
 	if err := securefile.ReplaceDurable(staged, u.statePath()); err != nil {
 		return &safeError{ErrLocal, err}
 	}

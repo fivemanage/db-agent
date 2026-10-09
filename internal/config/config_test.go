@@ -138,6 +138,33 @@ func TestDumpDuration(t *testing.T) {
 	}
 }
 
+func TestBackupScheduleRequiresFiveLocalTimeFields(t *testing.T) {
+	for _, expression := range []string{
+		"", "private-invalid-schedule", "0 0 4 * * *", "CRON_TZ=UTC 0 4 * * *", "TZ=UTC 0 4 * * *",
+		"@daily", "@every 24h", "0 25 * * *", "0 4 31 2 *",
+	} {
+		_, err := (BackupConfig{Schedule: expression}).ParseSchedule()
+		if err == nil || strings.Contains(err.Error(), "private-invalid") {
+			t.Fatalf("schedule accepted or echoed: %v", err)
+		}
+	}
+	for _, expression := range []string{"0 4 * * *", "*/15 2-5 * * MON-FRI", "0 4 29 2 *"} {
+		if _, err := (BackupConfig{Schedule: expression}).ParseSchedule(); err != nil {
+			t.Fatalf("valid schedule rejected: %v", err)
+		}
+	}
+}
+
+func TestLoadAgentRejectsInvalidScheduleBeforeLocalSetup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := securefile.Create(path, []byte("agent_credential: dac_local\nbackup:\n  schedule: private-invalid-schedule\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAgent(path); err == nil || !strings.Contains(err.Error(), "five-field cron") || strings.Contains(err.Error(), "private-invalid") {
+		t.Fatalf("invalid service schedule was accepted or echoed: %v", err)
+	}
+}
+
 func TestLoadReaderPreservesExplicitFalseValues(t *testing.T) {
 	input := minimalConfig + `
 backup:

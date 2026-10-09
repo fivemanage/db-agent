@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/fivemanage/db-agent/internal/agent"
+	"github.com/fivemanage/db-agent/internal/backup"
 	"github.com/fivemanage/db-agent/internal/config"
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/fivemanage/db-agent/internal/diagnostic"
-	"github.com/fivemanage/db-agent/internal/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -49,6 +49,10 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	if err != nil {
 		return err
 	}
+	scheduler, err := backup.NewScheduler(filepath.Join(filepath.Dir(path), "backup-transfer"), settings.Backup.Schedule)
+	if err != nil {
+		return err
+	}
 
 	checks := diagnostic.RunReport(ctx, settings)
 	printChecks(output, checks.Checks)
@@ -62,19 +66,10 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	}
 
 	client.OnOverrides = func(ctx context.Context, overrides config.DashboardOverrides) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		return config.SaveDashboardOverrides(path, overrides)
+		return applyAgentOverrides(ctx, path, scheduler, overrides)
 	}
 
-	options := transfer.Options{}
-	if settings.Backup.ThrottleIO {
-		options.BytesPerSecond = 4 << 20
-	}
-
-	uploader, err := transfer.New(filepath.Join(filepath.Dir(path), "backup-transfer"), client, options)
+	runner, err := newBackupRunner(path, settings, client)
 	if err != nil {
 		return err
 	}
@@ -82,8 +77,11 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	return runAgent(ctx, output, errorOutput, agentWork{
 		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
 			return runHeartbeatTransfers(ctx, func(ctx context.Context, report func(controlplane.Result)) error {
-				return client.RunHeartbeat(ctx, func() controlplane.State { return state }, report)
-			}, uploader.Resume, report, errorOutput)
+				return client.RunHeartbeat(ctx, func() controlplane.State { return runner.HeartbeatState(state) }, report)
+			}, runner.Resume, report, errorOutput)
+		},
+		backups: func(ctx context.Context) error {
+			return runScheduledBackups(ctx, path, scheduler, runner, client, state.Status == controlplane.Idle, output, errorOutput)
 		},
 		update: func(ctx context.Context) (bool, error) {
 			effective, err := config.LoadAgent(path)
@@ -110,6 +108,7 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 
 type agentWork struct {
 	heartbeats func(context.Context, func(controlplane.Result)) error
+	backups    func(context.Context) error
 	update     func(context.Context) (bool, error)
 }
 
@@ -141,6 +140,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 
 	reports := make(chan controlplane.Result, 1)
 	heartbeatDone := make(chan error, 1)
+	backupDone := make(chan error, 1)
 	updates := make(chan updateResult, 1)
 
 	workers.Add(1)
@@ -157,6 +157,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 
 	var previous controlplane.Connection
 	updaterStarted := false
+	backupsStarted := false
 	fmt.Fprintln(output, "Agent started. A heartbeat confirms connectivity, not a completed backup.")
 
 	for {
@@ -182,6 +183,14 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 
 			// A rejected initial credential must not start agent work. Public,
 			// signed update checks can still run during a transient API outage.
+			if !backupsStarted && work.backups != nil && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
+				backupsStarted = true
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					backupDone <- work.backups(ctx)
+				}()
+			}
 			if autoUpdate && !updaterStarted && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
 				updaterStarted = true
 				workers.Add(1)
@@ -190,6 +199,8 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 					runAgentUpdates(ctx, work.update, updates)
 				}()
 			}
+		case err := <-backupDone:
+			return err
 		case result := <-updates:
 			if result.err != nil {
 				fmt.Fprintf(errorOutput, "Update check failed: %v\n", result.err)

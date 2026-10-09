@@ -87,8 +87,8 @@ func Load(path string) (Config, error) {
 	return decode(v)
 }
 
-// LoadAgent only requires the control-plane settings needed for enrollment,
-// heartbeat, and updates. Database settings can be completed before backups.
+// LoadAgent requires control-plane settings and a valid local-time schedule.
+// Database/key setup can remain incomplete while heartbeat reports prerequisites.
 func LoadAgent(path string) (Config, error) {
 	c, err := LoadUpdate(path)
 	if err != nil {
@@ -96,6 +96,9 @@ func LoadAgent(path string) (Config, error) {
 	}
 
 	if err := c.ValidateAgent(); err != nil {
+		return Config{}, fmt.Errorf("invalid agent config: %w", err)
+	}
+	if _, err := c.Backup.ParseSchedule(); err != nil {
 		return Config{}, fmt.Errorf("invalid agent config: %w", err)
 	}
 
@@ -207,8 +210,8 @@ func (c Config) Validate() error {
 }
 
 func (c BackupConfig) Validate() error {
-	if _, err := cron.ParseStandard(c.Schedule); err != nil {
-		return errors.New("backup schedule must be a valid five-field cron expression")
+	if _, err := c.ParseSchedule(); err != nil {
+		return err
 	}
 
 	if c.RetentionDays < 1 {
@@ -223,6 +226,22 @@ func (c BackupConfig) Validate() error {
 	}
 
 	return nil
+}
+
+func (c BackupConfig) ParseSchedule() (cron.Schedule, error) {
+	// ParseStandard also accepts timezone prefixes and descriptors. Neither is
+	// part of the local-time, five-field backup policy shared with the server.
+	if len(c.Schedule) > 256 || len(strings.Fields(c.Schedule)) != 5 {
+		return nil, errors.New("backup schedule must be a valid five-field cron expression in local time; timezone prefixes and shortcuts are not supported")
+	}
+	schedule, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(c.Schedule)
+	if err != nil {
+		return nil, errors.New("backup schedule must be a valid five-field cron expression in local time")
+	}
+	if schedule.Next(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)).IsZero() {
+		return nil, errors.New("backup schedule has no possible run; use a valid five-field cron expression in local time")
+	}
+	return schedule, nil
 }
 
 // DumpDuration also supplies the default for programmatically constructed configs.

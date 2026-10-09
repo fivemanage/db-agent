@@ -31,6 +31,10 @@ func TestAgentCredentialRejectionDoesNotStartUpdater(t *testing.T) {
 			t.Error("updater started with a rejected initial credential")
 			return false, nil
 		},
+		backups: func(context.Context) error {
+			t.Error("scheduling started with a rejected initial credential")
+			return nil
+		},
 	}, true)
 	if !errors.Is(err, controlplane.ErrCredentialRejected) {
 		t.Fatalf("rejection not returned: %v", err)
@@ -138,6 +142,79 @@ func TestAgentWithoutAutoUpdateStillRunsHeartbeats(t *testing.T) {
 	}, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentSchedulingIndependentOfHeartbeatsAndJoinedForUpdate(t *testing.T) {
+	for _, connection := range []controlplane.Connection{controlplane.Connected, controlplane.Unreachable} {
+		t.Run(string(connection), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			backupStarted, backupStopped := make(chan struct{}), make(chan struct{})
+			heartbeatStopped := make(chan struct{})
+			var output bytes.Buffer
+			err := runAgent(ctx, &output, &output, agentWork{
+				heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
+					defer close(heartbeatStopped)
+					report(controlplane.Result{Connection: connection})
+					select {
+					case <-backupStarted:
+					case <-ctx.Done():
+						return nil
+					}
+					report(controlplane.Result{Connection: connection})
+					<-ctx.Done()
+					return nil
+				},
+				backups: func(ctx context.Context) error {
+					close(backupStarted)
+					<-ctx.Done()
+					close(backupStopped)
+					return nil
+				},
+				update: func(ctx context.Context) (bool, error) {
+					select {
+					case <-backupStarted:
+						return true, nil
+					case <-ctx.Done():
+						return false, ctx.Err()
+					}
+				},
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stopped := range []chan struct{}{backupStopped, heartbeatStopped} {
+				select {
+				case <-stopped:
+				default:
+					t.Fatal("update handoff left a worker running")
+				}
+			}
+		})
+	}
+}
+
+func TestAgentSchedulerFailureStopsAndJoinsHeartbeats(t *testing.T) {
+	stopped := make(chan struct{})
+	terminal := errors.New("private state unavailable")
+	var output bytes.Buffer
+	err := runAgent(context.Background(), &output, &output, agentWork{
+		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
+			report(controlplane.Result{Connection: controlplane.Connected})
+			<-ctx.Done()
+			close(stopped)
+			return nil
+		},
+		backups: func(context.Context) error { return terminal },
+	}, false)
+	if !errors.Is(err, terminal) {
+		t.Fatalf("scheduler error not returned: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("scheduler failure leaked heartbeat worker")
 	}
 }
 

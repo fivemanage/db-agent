@@ -78,7 +78,8 @@ var installCmd = &cobra.Command{
 			return err
 		}
 
-		return errors.New("setup incomplete: the first backup is not implemented; the service is installed, but no working backup exists yet")
+		fmt.Fprintln(cmd.OutOrStdout(), "Service started. Backups run in the background; use db-agent status to check the first outcome.")
+		return nil
 	},
 }
 

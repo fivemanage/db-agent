@@ -77,6 +77,15 @@ func New(dir string, plane ControlPlane, options Options) (*Uploader, error) {
 // unblock Read; the orchestrator still owns joining its dump process workers.
 // No raw dump bytes can reach disk or the control plane through this API.
 func (u *Uploader) Run(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression, estimate *int64) error {
+	return u.RunWithProgress(ctx, source, k, compression, estimate, nil)
+}
+
+func (u *Uploader) RunWithProgress(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression, estimate *int64, observe func(Progress) error) error {
+	s := &session{Uploader: u, observe: observe}
+	return s.run(ctx, source, k, compression, estimate)
+}
+
+func (u *session) run(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression, estimate *int64) error {
 	if source == nil {
 		return errors.New("backup source is required")
 	}
@@ -107,6 +116,9 @@ func (u *Uploader) Run(ctx context.Context, source io.ReadCloser, k key.Key, com
 	if previous != nil {
 		return ErrBusy
 	}
+	if err := u.headroom(); err != nil {
+		return err
+	}
 
 	id, err := controlplane.NewRequestID()
 	if err != nil {
@@ -135,6 +147,11 @@ func (u *Uploader) Run(ctx context.Context, source io.ReadCloser, k key.Key, com
 	}
 
 	metadata, err := u.stage(ctx, source, k, compression)
+	// Join the producer before any report/retry networking. A failed downstream
+	// write must not leave a dump blocked on its pipe during an API outage.
+	if closeErr := source.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
 		e.Completion.DurationSeconds = time.Since(e.Initiation.StartedAt).Seconds()
 		e.Phase = "report"
@@ -160,13 +177,26 @@ func (u *Uploader) Run(ctx context.Context, source io.ReadCloser, k key.Key, com
 		Checksum:  metadata.Checksum,
 	}
 	if err := u.save(e); err != nil {
-		return err
+		return errors.Join(err, remove(u.artifactPath()))
 	}
 
 	return u.resume(ctx, e)
 }
 
-func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression) (artifact.Metadata, error) {
+func (u *Uploader) headroom() error {
+	available, err := freeSpace(u.dir)
+	if err != nil {
+		return &safeError{ErrLocal, err}
+	}
+	// Leave room for state updates and the first encrypted record before reading
+	// any SQL. Per-write checks still protect the reserve as other processes write.
+	if available < uint64(u.options.FreeSpaceReserve)+(128<<10) {
+		return ErrLimit
+	}
+	return nil
+}
+
+func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression) (metadata artifact.Metadata, err error) {
 	if err := os.MkdirAll(u.dir, 0700); err != nil {
 		return artifact.Metadata{}, err
 	}
@@ -179,6 +209,12 @@ func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, c
 		return artifact.Metadata{}, err
 	}
 	defer file.Close()
+	defer func() {
+		if err != nil {
+			file.Close()
+			err = errors.Join(err, remove(u.artifactPath()))
+		}
+	}()
 
 	closed := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
@@ -199,7 +235,7 @@ func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, c
 			return freeSpace(u.dir)
 		},
 	}
-	metadata, err := artifact.Encrypt(ctx, destination, source, k, compression)
+	metadata, err = artifact.Encrypt(ctx, destination, source, k, compression)
 	if err != nil {
 		return artifact.Metadata{}, err
 	}
@@ -244,6 +280,15 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // upload attempts, or replays the exact durable terminal report once (the client
 // itself retries transient API failures). A busy active run isn't interrupted.
 func (u *Uploader) Resume(ctx context.Context) error {
+	return u.ResumeWithProgress(ctx, nil)
+}
+
+func (u *Uploader) ResumeWithProgress(ctx context.Context, observe func(Progress) error) error {
+	s := &session{Uploader: u, observe: observe}
+	return s.recover(ctx)
+}
+
+func (u *session) recover(ctx context.Context) error {
 	if !u.mu.TryLock() {
 		return ErrBusy
 	}
@@ -259,6 +304,9 @@ func (u *Uploader) Resume(ctx context.Context) error {
 	if err != nil || e == nil {
 		return err
 	}
+	if err := u.notify(e, false); err != nil {
+		return err
+	}
 
 	return u.resume(ctx, e)
 }
@@ -268,31 +316,17 @@ func (u *Uploader) lock() (func(), error) {
 		return nil, &safeError{ErrLocal, err}
 	}
 
-	path := filepath.Join(u.dir, ".lock")
-	file, err := securefile.OpenNew(path)
-	if err == nil {
-		err = file.Close()
+	unlock, err := securefile.TryLock(filepath.Join(u.dir, ".lock"))
+	if errors.Is(err, securefile.ErrLocked) {
+		return nil, ErrBusy
 	}
-	if err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, &safeError{ErrLocal, err}
-	}
-
-	file, err = securefile.Open(path, 0)
 	if err != nil {
 		return nil, &safeError{ErrLocal, err}
 	}
-	if err := lockFile(file); err != nil {
-		file.Close()
-		return nil, err
-	}
-
-	return func() {
-		unlockFile(file)
-		file.Close()
-	}, nil
+	return unlock, nil
 }
 
-func (u *Uploader) resume(parent context.Context, e *entry) error {
+func (u *session) resume(parent context.Context, e *entry) error {
 	ctx, cancel := context.WithTimeout(parent, u.options.SessionTimeout)
 	defer cancel()
 
@@ -381,7 +415,7 @@ func (u *Uploader) resume(parent context.Context, e *entry) error {
 	return ErrPending
 }
 
-func (u *Uploader) fail(ctx context.Context, e *entry, problem controlplane.Problem) error {
+func (u *session) fail(ctx context.Context, e *entry, problem controlplane.Problem) error {
 	e.Phase = "report"
 	e.Completion = controlplane.CompleteBackupRequest{
 		Status:          "failed",
@@ -395,7 +429,7 @@ func (u *Uploader) fail(ctx context.Context, e *entry, problem controlplane.Prob
 	return u.deliver(ctx, e)
 }
 
-func (u *Uploader) deliver(ctx context.Context, e *entry) error {
+func (u *session) deliver(ctx context.Context, e *entry) error {
 	// The report is committed before freeing the artifact or contacting the API.
 	if err := remove(u.artifactPath()); err != nil {
 		return err
@@ -418,6 +452,9 @@ func (u *Uploader) deliver(ctx context.Context, e *entry) error {
 
 	if err := u.plane.CompleteBackup(ctx, e.BackupID, e.Completion); err != nil {
 		return &safeError{ErrPending, err}
+	}
+	if err := u.notify(e, true); err != nil {
+		return err
 	}
 
 	return remove(u.statePath())

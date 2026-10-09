@@ -2,19 +2,19 @@
 
 Customer-hosted MySQL/MariaDB backup agent for FiveManage. **Work in progress:**
 registration, local database setup, recovery-key generation, diagnostics,
-foreground/service heartbeats, and signed update support exist. Scheduled backups
-and uploads are not implemented yet. A passing diagnostic or running service does
-not mean a backup exists.
+foreground/service heartbeats, signed updates, and scheduled/manual encrypted backups/uploads
+exist. The restore CLI is not implemented yet. A passing diagnostic
+or running service does not mean a backup exists.
 
 The streaming backup codec is implemented in `internal/artifact`: zstd (default)
 or gzip, locally encrypted with chunked AES-256-GCM, with encrypted size/SHA-256
-metadata and restore decoding. The CLI does not run this pipeline yet. See
+metadata and restore decoding. `backup --now` runs this pipeline. See
 [ARTIFACT.md](ARTIFACT.md) for the versioned format, security constraints, and
 future upload/restore integration.
 
 The scoped logical dump executor is implemented in `internal/dump`, with private
 client credentials, timeouts, process-tree cancellation, and output throttling.
-It is not yet wired into `backup --now`. See [DUMP.md](DUMP.md) for its contract,
+It is wired into `backup --now`. See [DUMP.md](DUMP.md) for its contract,
 consistency limits, and real MySQL/MariaDB integration tests.
 
 ## Register and connect
@@ -81,9 +81,9 @@ users for an API URL. Until a production endpoint is configured, development
 builds require `--api-url` for initial enrollment; resumed setup uses the saved
 URL. `install` sets up the recovery key after database setup, runs diagnostics, and installs
 and starts the service only if all prerequisites pass. Failed checks leave any
-existing service unchanged. The first backup remains incomplete,
-so the wizard still returns a nonzero incomplete-setup result rather than claiming
-a working backup installation. Saved settings remain available for the next attempt.
+existing service unchanged. The service attempts an initial backup in the background
+when local prerequisites pass and no earlier run is recorded. Installation does not
+wait for an upload; use `db-agent status` to check the first outcome.
 
 Connection and discovery use a ten-second deadline. MySQL 5.7+ and MariaDB 10.3+
 are the initial supported server versions. Diagnostics print PASS/FAIL/SKIP for
@@ -169,15 +169,76 @@ logged; structured retry events contain only attempt/delay metadata.
 
 Heartbeats continue during slow signed-update checks and when `auto_update` is
 disabled or the binary is a `dev` build. Ctrl+C, process termination, and a staged
-update cancel in-flight requests/backoff and join both workers before exit.
+update cancel in-flight requests/backoff and join heartbeat, backup/recovery, and
+update workers before exit.
 Connection changes are printed once rather than on every successful poll.
 
 The dashboard endpoint and its `0100_database_agent_heartbeat` migration must be
 deployed in `fivemanage` first. The dashboard marks the agent stale after three
 minutes without a heartbeat, independently of any historical backup result.
 `idle` means the process is not backing up; it is not proof of a completed backup.
-Actual `backing_up`/`uploading` transitions will be supplied by the backup pipeline
-when implemented. Runtime state persistence/recovery remains separate work (DEV-501).
+Heartbeats read shared private backup state, including manual runs in another
+process, and report `backing_up`, `uploading`, and terminal idle/error states.
+`db-agent status` shows recorded backup state and the next scheduled run; live
+service health remains separate work (DEV-501).
+
+### Run a backup now (DEV-494)
+
+```sh
+./db-agent backup --now --config ./config.yaml
+```
+
+Use the installed agent's config and the intended service/Administrator account.
+The command validates local prerequisites and executes the selected logical dump,
+compression, encryption, throttled upload, and completion report. It also runs
+heartbeats independently and reports terminal state before exit. Success means
+the upload and its completion were acknowledged, not just that the dump exited.
+The control plane must provide the endpoints/idempotency contract in
+[TRANSFER.md](TRANSFER.md) (DEV-514); this command does not deploy them.
+
+A whole-run OS lock excludes manual, scheduled, startup runs, and transfer recovery.
+A second trigger fails with an already-running
+message without launching a dump. Queued transfers/completions block new backups
+until the running agent resolves them after an accepted heartbeat.
+
+Only ciphertext is spooled, with a 1 GiB cap and 256 MiB disk reserve. Headroom
+is checked before spooling and before every ciphertext write. Partial artifacts
+are removed on failure, and the dump process and workers are joined before
+network reporting. Private `backup-transfer/run.json` beside config retains the
+latest run's identity, timing, outcome, encrypted size/checksum, pending status,
+and classified last error; no SQL, credentials, keys, or signed URLs are saved.
+See [BACKUP.md](BACKUP.md) for lifecycle and recovery details.
+
+### Scheduled backups (DEV-498)
+
+The foreground agent and service use `backup.schedule`, defaulting to `0 4 * * *`
+(4am in the machine's local timezone). Use five cron fields: minute, hour, day of
+month, month, and day of week. Seconds, `@daily`/`@every`, and `TZ=`/`CRON_TZ=`
+prefixes are rejected. Invalid or impossible schedules fail configuration validation
+without echoing their contents.
+
+Local schedule edits and timezone changes take effect on service restart. Validated
+heartbeat schedule overrides are saved and picked up within one second; they do
+not interrupt a running backup. Each new run reads saved backup policy. Backups
+continue during transient heartbeat outages, but rejected credentials stop and join
+all work. A ready agent with no recorded run attempts one initial backup at startup;
+subsequent restarts do not force another dump or replay missed cron occurrences.
+
+Overlapping ticks are skipped, not queued. In-flight clock jumps forward consume
+at most one due run; backward corrections do not repeat an already-consumed instant.
+Calendar/DST behavior follows robfig/cron: nonexistent local times are skipped,
+and a repeated hour can have two distinct occurrences. The default 4am avoids
+the usual DST transition hour.
+
+```sh
+./db-agent status --config ./config.yaml
+```
+
+The private `backup-transfer/schedule.json` records the expression, observation time,
+and next run with a timezone offset, independently of run history. Graceful stop
+clears the next run. After a crash the timestamp may be stale: this command shows
+**recorded state, not live service health**. Remote "Back up now" polling is deferred:
+the current heartbeat response has no stable request/acknowledgement contract.
 
 ### Run as a system service (DEV-491)
 
@@ -219,9 +280,9 @@ install time; the installing shell's environment is not required after reboot.
 Use absolute encryption-key paths as well. Linux paths containing `%`, `$`,
 quotes, backslashes, or line breaks are rejected before writing a unit.
 
-Stopping cancels the root context and waits for diagnostics, heartbeat, update
-work, and cleanup. The runtime exposes reverse-order cleanup hooks with a fresh
-cancellable context for future backup resources; stop waits at most 15 seconds
+Stopping cancels the root context and waits for diagnostics, heartbeat, scheduling,
+backup/recovery, update work, and cleanup. The runtime exposes reverse-order cleanup
+hooks with a fresh cancellable context for resource cleanup; stop waits at most 15 seconds
 before reporting a shutdown error. Windows machine shutdown uses the same path.
 Registration stays in setup; the service never persists/reuses an enrollment token
 or automatically re-enrolls. A terminal heartbeat failure or staged update also
@@ -274,8 +335,9 @@ Validated fields are saved atomically while preserving credentials, key paths,
 API/update URLs, and unknown local fields. Policy can be applied before DB/key
 setup finishes. Signed-update checks reread effective policy before each check;
 disabling updates prevents subsequent checks, but does not change pinned trust
-or interrupt an already authorized replacement. Future backup scheduling uses
-the saved policy; local configuration is reread on restart.
+or interrupt an already authorized replacement. Scheduling uses the saved policy
+and applies heartbeat schedule changes on its next clock sample; local schedule edits are
+reread on restart.
 
 Typed client methods define `POST /v1/backups/initiate`,
 `POST /v1/backups/{id}/complete`, and `GET /v1/backups/{id}/download`.
