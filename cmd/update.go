@@ -26,7 +26,7 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 
 	manifestURL := settings.UpdateURL
 	if manifestURL == "" {
-		manifestURL = strings.TrimRight(settings.APIURL, "/") + "/v1/agent/updates"
+		manifestURL = strings.TrimRight(settings.APIURL, "/") + "/api/v1/agent/updates"
 	}
 	manifestURL = strings.ReplaceAll(strings.ReplaceAll(manifestURL, "{os}", runtime.GOOS), "{arch}", runtime.GOARCH)
 

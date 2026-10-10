@@ -56,19 +56,30 @@ func BackupAccountSQL(driver, version string, databases []string) ([]string, err
 	return append(statements, "GRANT "+routine+" TO "+backupAccount), nil
 }
 
-// LocalBackupAccountSQL includes a TCP identity because Linux MariaDB and
-// skip-name-resolve MySQL do not necessarily match local TCP to @localhost.
-func LocalBackupAccountSQL(driver, version string, databases []string, host string) ([]string, error) {
+// LocalBackupAccountSQL keeps the destination local while using the client host
+// seen by the server, which can be a bridge address for a containerized database.
+func LocalBackupAccountSQL(driver, version string, databases []string, host, clientHost string) ([]string, error) {
 	ip, err := localTCPHost(host)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateClientHost(clientHost); err != nil {
 		return nil, err
 	}
 	statements, err := BackupAccountSQL(driver, version, databases)
 	if err != nil {
 		return nil, err
 	}
-	account := "'db_agent_backup'@'" + ip + "'"
-	all := append([]string(nil), statements...)
+	var all []string
+	clientIP := net.ParseIP(clientHost)
+	if strings.EqualFold(clientHost, "localhost") || clientIP != nil && clientIP.IsLoopback() {
+		// Preserve both native local identities for name-resolution differences.
+		all = append(all, statements...)
+		if strings.EqualFold(clientHost, "localhost") {
+			clientHost = ip
+		}
+	}
+	account := "'db_agent_backup'@'" + clientHost + "'"
 	for _, statement := range statements {
 		if strings.HasPrefix(statement, "CREATE USER ") {
 			all = append(all, "CREATE USER "+account+" IDENTIFIED BY '<generated password>'")
@@ -77,6 +88,46 @@ func LocalBackupAccountSQL(driver, version string, databases []string, host stri
 		}
 	}
 	return all, nil
+}
+
+func readClientHost(ctx context.Context, db accountExecutor) (string, error) {
+	var identity string
+	// CURRENT_USER() is the matched account (possibly @%), not the client host.
+	if err := db.QueryRowContext(ctx, "SELECT USER()").Scan(&identity); err != nil {
+		return "", errors.New("could not determine the database's client host; use an existing backup account or retry the connection check")
+	}
+	host := ""
+	if at := strings.LastIndexByte(identity, '@'); at >= 0 {
+		host = identity[at+1:]
+	}
+	if err := validateClientHost(host); err != nil {
+		return "", err
+	}
+	return host, nil
+}
+
+func validateClientHost(host string) error {
+	invalid := errors.New("the database did not report a safe exact client host; use an existing backup account or ask a local administrator to inspect the connection")
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() || ip.IsMulticast() {
+			return invalid
+		}
+		return nil
+	}
+	if host == "" || len(host) > 253 {
+		return invalid
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return invalid
+		}
+		for _, ch := range label {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-') {
+				return invalid
+			}
+		}
+	}
+	return nil
 }
 
 func localTCPHost(host string) (string, error) {
@@ -99,16 +150,18 @@ func quoteGrantIdentifier(name string) string {
 
 type accountExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // ProvisionBackupAccount never alters an existing account. The callback must
 // verify and persist the generated backup credentials, not the admin settings.
-// On failure, only an account successfully created by this call is removed.
-func ProvisionBackupAccount(ctx context.Context, admin config.DatabaseConfig, driver, version string, persist func(config.DatabaseConfig) error) error {
+// The server must still report the client host used in the approved SQL preview.
+// On failure, only identities successfully created by this call are removed.
+func ProvisionBackupAccount(ctx context.Context, admin config.DatabaseConfig, driver, version, clientHost string, persist func(config.DatabaseConfig) error) error {
 	if err := ValidateLocalConnection(admin); err != nil {
 		return err
 	}
-	statements, err := LocalBackupAccountSQL(driver, version, admin.Databases, admin.Host)
+	statements, err := LocalBackupAccountSQL(driver, version, admin.Databases, admin.Host, clientHost)
 	if err != nil {
 		return err
 	}
@@ -119,10 +172,18 @@ func ProvisionBackupAccount(ctx context.Context, admin config.DatabaseConfig, dr
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
-	return provisionAccount(ctx, db, admin, driver, statements, persist)
+	return provisionAccount(ctx, db, admin, driver, clientHost, statements, persist)
 }
 
-func provisionAccount(ctx context.Context, db accountExecutor, admin config.DatabaseConfig, driver string, statements []string, persist func(config.DatabaseConfig) error) error {
+func provisionAccount(ctx context.Context, db accountExecutor, admin config.DatabaseConfig, driver, clientHost string, statements []string, persist func(config.DatabaseConfig) error) error {
+	observedHost, err := readClientHost(ctx, db)
+	if err != nil {
+		return err
+	}
+	if observedHost != clientHost {
+		return errors.New("the database's client host changed after SQL approval; no accounts were created; retry setup to approve the current host")
+	}
+
 	var password [32]byte
 	if _, err := rand.Read(password[:]); err != nil {
 		return fmt.Errorf("generate backup password: %w", err)
@@ -142,7 +203,7 @@ func provisionAccount(ctx context.Context, db accountExecutor, admin config.Data
 			if isCreate {
 				// A lost response may mean CREATE succeeded. Never drop this
 				// identity unless this call positively knows it created it.
-				failure = errors.New("could not create the local db_agent_backup identities; check CREATE USER privileges and whether either account already exists. Existing accounts are never changed; use an existing backup account or ask a local administrator to inspect it")
+				failure = errors.New("could not create the approved db_agent_backup identities; check CREATE USER privileges and whether an account already exists. Existing accounts are never changed; use an existing backup account or ask a local administrator to inspect it")
 			} else {
 				failure = errors.New("could not grant backup access; ask a local administrator for grant authority on the selected schemas and routine visibility, or use an existing backup account")
 			}

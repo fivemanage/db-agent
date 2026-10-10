@@ -14,9 +14,12 @@ import (
 )
 
 func TestAPIReachabilityDoesNotSendSecrets(t *testing.T) {
-	for _, status := range []int{200, 401, 404, 503, 302} {
+	for _, status := range []int{200, 401, 404, 405, 503, 302} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/v1/agent/register" {
+					t.Error("probe did not request the unauthenticated agent endpoint")
+				}
 				if r.Header.Get("Authorization") != "" || r.ContentLength > 0 || r.URL.RawQuery != "" {
 					t.Error("probe sent credentials or payload")
 				}
@@ -25,11 +28,57 @@ func TestAPIReachabilityDoesNotSendSecrets(t *testing.T) {
 			}))
 			defer server.Close()
 			check := CheckAPI(context.Background(), server.URL)
-			want := status < 300 || status >= 400 && status < 500
+			want := status < 300 || status >= 400 && status < 500 && status != 404 && status != 405
 			if check.Passed != want || strings.Contains(check.Message, "never-print-this") {
 				t.Fatalf("check=%+v", check)
 			}
 		})
+	}
+}
+
+func TestAPIReachabilityIgnoresDashboardRootRedirect(t *testing.T) {
+	for _, prefix := range []string{"", "/", "/base/"} {
+		t.Run(prefix, func(t *testing.T) {
+			endpoint := strings.TrimRight(prefix, "/") + "/api/v1/agent/register"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != endpoint {
+					http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			if check := CheckAPI(context.Background(), server.URL+prefix); !check.Passed {
+				t.Fatalf("dashboard redirect blocked the agent probe: %+v", check)
+			}
+		})
+	}
+}
+
+func TestAPIReachabilityRejectsAgentEndpointRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agent/register" {
+			t.Error("probe followed the endpoint redirect")
+		}
+		http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	if check := CheckAPI(context.Background(), server.URL); check.Passed || !strings.Contains(check.Message, "redirected") {
+		t.Fatalf("endpoint redirect was not rejected: %+v", check)
+	}
+}
+
+func TestAPIReachabilityRejectsDuplicatedAPIPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/register" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	if check := CheckAPI(context.Background(), server.URL+"/api"); check.Passed || !strings.Contains(check.Message, "without /api") {
+		t.Fatalf("duplicated API prefix was not rejected: %+v", check)
 	}
 }
 

@@ -30,7 +30,7 @@ problems are sent to the completion endpoint.
 
 ## Control-plane contract required by DEV-514
 
-- `POST /v1/backups/initiate` uses one durable CSPRNG-generated Idempotency-Key.
+- `POST /api/v1/backups/initiate` uses one durable CSPRNG-generated Idempotency-Key.
   All replays use identical initiation metadata, including the start time/estimate.
 - A replay must return the **same backup ID and object**, issuing a fresh upload
   URL when necessary. The client rejects a changed backup ID. No separate renewal

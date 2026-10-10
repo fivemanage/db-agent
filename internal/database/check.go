@@ -30,6 +30,7 @@ type Report struct {
 	Checks         []Check
 	Driver         string
 	Version        string
+	ClientHost     string
 	Databases      []string
 	CanCreateUser  bool
 	Administrative bool
@@ -111,6 +112,8 @@ func inspect(ctx context.Context, db *sql.DB, settings config.DatabaseConfig) Re
 		{Name: "Database connectivity", Passed: true, Message: "Server reached."},
 		{Name: "Database authentication", Passed: true, Message: "Local account authenticated."},
 	}}
+	// Host discovery gates account creation, not use of an existing account.
+	r.ClientHost, _ = readClientHost(ctx, db)
 
 	var version string
 	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {

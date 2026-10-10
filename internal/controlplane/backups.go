@@ -59,7 +59,7 @@ func (c *Client) InitiateBackup(ctx context.Context, input InitiateBackupRequest
 		return InitiateBackupResponse{}, errors.New("backup initiation requires a stable request ID, start time, and nonnegative size estimate")
 	}
 
-	contents, err := c.request(ctx, request{operation: "backup initiation", method: http.MethodPost, path: "/v1/backups/initiate", credential: c.credential, requestID: input.RequestID, body: input, created: true})
+	contents, err := c.request(ctx, request{operation: "backup initiation", method: http.MethodPost, path: "/api/v1/backups/initiate", credential: c.credential, requestID: input.RequestID, body: input, created: true})
 	if err != nil {
 		return InitiateBackupResponse{}, err
 	}
@@ -106,7 +106,7 @@ func (c *Client) CompleteBackup(ctx context.Context, backupID string, input Comp
 		request{
 			operation:  "backup completion",
 			method:     http.MethodPost,
-			path:       "/v1/backups/" + backupID + "/complete",
+			path:       "/api/v1/backups/" + backupID + "/complete",
 			credential: c.credential, body: body,
 		})
 
@@ -118,7 +118,7 @@ func (c *Client) DownloadBackup(ctx context.Context, backupID string) (DownloadB
 		return DownloadBackupResponse{}, errors.New("invalid backup ID")
 	}
 
-	contents, err := c.request(ctx, request{operation: "backup download", method: http.MethodGet, path: "/v1/backups/" + backupID + "/download", credential: c.credential})
+	contents, err := c.request(ctx, request{operation: "backup download", method: http.MethodGet, path: "/api/v1/backups/" + backupID + "/download", credential: c.credential})
 	if err != nil {
 		return DownloadBackupResponse{}, err
 	}

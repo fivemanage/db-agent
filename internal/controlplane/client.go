@@ -111,7 +111,7 @@ func (c *Client) Heartbeat(ctx context.Context, state State) error {
 		return err
 	}
 
-	contents, err := c.request(ctx, request{operation: "heartbeat", method: http.MethodPost, path: "/v1/agent/heartbeat", credential: c.credential, body: payload})
+	contents, err := c.request(ctx, request{operation: "heartbeat", method: http.MethodPost, path: "/api/v1/agent/heartbeat", credential: c.credential, body: payload})
 	if err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func (c *Client) request(ctx context.Context, call request) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if call.credential == "" && !(call.method == http.MethodGet && call.path == "/v1/agent/register") {
+	if call.credential == "" && !(call.method == http.MethodGet && call.path == "/api/v1/agent/register") {
 		return nil, errors.New("authenticated control-plane request requires a credential")
 	}
 

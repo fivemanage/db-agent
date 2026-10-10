@@ -79,7 +79,7 @@ func (c *Client) Register(ctx context.Context, token, proposedCredential string,
 	}
 	// Capability negotiation happens before sending the one-time token. Older
 	// servers must not consume it while silently ignoring replay protection.
-	capabilities, err := c.request(ctx, request{operation: "registration discovery", method: http.MethodGet, path: "/v1/agent/register"})
+	capabilities, err := c.request(ctx, request{operation: "registration discovery", method: http.MethodGet, path: "/api/v1/agent/register"})
 	if err != nil {
 		return RegistrationResult{}, err
 	}
@@ -93,7 +93,7 @@ func (c *Client) Register(ctx context.Context, token, proposedCredential string,
 		RegistrationMetadata
 		Credential string `json:"agent_credential"`
 	}{metadata, proposedCredential}
-	contents, err := c.request(ctx, request{operation: "registration", method: http.MethodPost, path: "/v1/agent/register", credential: token, body: body, enrollment: true})
+	contents, err := c.request(ctx, request{operation: "registration", method: http.MethodPost, path: "/api/v1/agent/register", credential: token, body: body, enrollment: true})
 	if err != nil {
 		return RegistrationResult{}, err
 	}

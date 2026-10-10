@@ -75,7 +75,7 @@ func TestBackupContractsUseAPIAuthAndStableInitiationIdentity(t *testing.T) {
 			t.Error("issued credential missing")
 		}
 		switch r.URL.Path {
-		case "/v1/backups/initiate":
+		case "/api/v1/backups/initiate":
 			if r.Header.Get("Idempotency-Key") != key {
 				t.Error("initiation identity changed")
 			}
@@ -90,14 +90,14 @@ func TestBackupContractsUseAPIAuthAndStableInitiationIdentity(t *testing.T) {
 			}
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(InitiateBackupResponse{BackupID: "backup_1", UploadURL: "https://storage.example/object?signature=private", ExpiresAt: expires})
-		case "/v1/backups/backup_1/complete":
+		case "/api/v1/backups/backup_1/complete":
 			var body map[string]json.RawMessage
 			json.NewDecoder(r.Body).Decode(&body)
 			if len(body) != 4 || body["checksum"] == nil {
 				t.Error("completion contract invalid")
 			}
 			io.WriteString(w, `{}`)
-		case "/v1/backups/backup_1/download":
+		case "/api/v1/backups/backup_1/download":
 			if r.Method != http.MethodGet {
 				t.Error("download lookup must be GET")
 			}

@@ -53,7 +53,7 @@ var configureCmd = &cobra.Command{
 
 type databaseSetup struct {
 	inspect   func(context.Context, config.DatabaseConfig) database.Report
-	provision func(context.Context, config.DatabaseConfig, string, string, func(config.DatabaseConfig) error) error
+	provision func(context.Context, config.DatabaseConfig, string, string, string, func(config.DatabaseConfig) error) error
 	save      func(config.DatabaseConfig) error
 }
 
@@ -102,8 +102,9 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 	}
 
 	candidate.Driver = report.Driver
-	statements, planErr := database.LocalBackupAccountSQL(report.Driver, report.Version, candidate.Databases, candidate.Host)
+	statements, planErr := database.LocalBackupAccountSQL(report.Driver, report.Version, candidate.Databases, candidate.Host, report.ClientHost)
 	if planErr == nil {
+		fmt.Fprintf(output, "Database sees this connection from %q; backup account access is restricted to exact hosts, never a wildcard.\n", report.ClientHost)
 		fmt.Fprintln(output, "Least-privilege account SQL (password placeholder is replaced privately; existing accounts are never modified):")
 		for _, statement := range statements {
 			fmt.Fprintf(output, "%s;\n", statement)
@@ -118,7 +119,7 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 			return err
 		}
 		if affirmative(create) {
-			return setup.provision(ctx, candidate, report.Driver, report.Version, func(backup config.DatabaseConfig) error {
+			return setup.provision(ctx, candidate, report.Driver, report.Version, report.ClientHost, func(backup config.DatabaseConfig) error {
 				verified := setup.inspect(ctx, backup)
 				printChecks(output, verified.Checks)
 				if !verified.Passed() || verified.Administrative {

@@ -29,7 +29,7 @@ func TestConnectionPromptNeverEchoesPasswordOrKeepsOldScope(t *testing.T) {
 }
 
 func setupReport(admin bool) database.Report {
-	r := database.Report{Driver: "mysql", Version: "8.4.0", CanCreateUser: admin, Administrative: admin}
+	r := database.Report{Driver: "mysql", Version: "8.4.0", ClientHost: "127.0.0.1", CanCreateUser: admin, Administrative: admin}
 	for _, name := range []string{"connectivity", "authentication", "version", "selection", "grants"} {
 		r.Checks = append(r.Checks, database.Check{Name: name, Passed: true})
 	}
@@ -50,7 +50,7 @@ func TestWizardNeverSavesSuppliedAdminCredentials(t *testing.T) {
 			saved, created := false, false
 			setup := databaseSetup{
 				inspect: func(_ context.Context, c config.DatabaseConfig) database.Report { return setupReport(c.User == "root") },
-				provision: func(_ context.Context, admin config.DatabaseConfig, _, _ string, persist func(config.DatabaseConfig) error) error {
+				provision: func(_ context.Context, admin config.DatabaseConfig, _, _, _ string, persist func(config.DatabaseConfig) error) error {
 					created = true
 					if admin.User != "root" || admin.Password != "private-admin-password" {
 						t.Fatal("wrong ephemeral account")
@@ -92,7 +92,7 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 			}
 			return r
 		},
-		provision: func(context.Context, config.DatabaseConfig, string, string, func(config.DatabaseConfig) error) error {
+		provision: func(context.Context, config.DatabaseConfig, string, string, string, func(config.DatabaseConfig) error) error {
 			t.Fatal("existing account path changed SQL")
 			return nil
 		},
@@ -110,6 +110,72 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 	}
 	if strings.Contains(output.String(), "private-backup-password") {
 		t.Fatal("backup password leaked")
+	}
+}
+
+func TestWizardApprovesObservedClientHostBeforeProvisioning(t *testing.T) {
+	for _, approve := range []bool{true, false} {
+		var output bytes.Buffer
+		created, saved := false, false
+		setup := databaseSetup{
+			inspect: func(_ context.Context, c config.DatabaseConfig) database.Report {
+				r := setupReport(c.User == "root")
+				r.ClientHost = "172.19.0.1"
+				return r
+			},
+			provision: func(_ context.Context, admin config.DatabaseConfig, _, _, host string, persist func(config.DatabaseConfig) error) error {
+				created = true
+				if !approve || host != "172.19.0.1" || admin.Host != "localhost" {
+					t.Fatal("unapproved host or incorrect destination passed to provisioning")
+				}
+				if !strings.Contains(output.String(), "CREATE USER 'db_agent_backup'@'172.19.0.1' IDENTIFIED BY '<generated password>';") ||
+					strings.Contains(output.String(), "'db_agent_backup'@'localhost'") || strings.Contains(output.String(), "'db_agent_backup'@'%'") {
+					t.Fatal("approved SQL does not match the exact bridge identity")
+				}
+				backup := admin
+				backup.User, backup.Password = "db_agent_backup", "generated-private-password"
+				return persist(backup)
+			},
+			save: func(config.DatabaseConfig) error { saved = true; return nil },
+		}
+		answer := "n\n"
+		if approve {
+			answer = "y\n"
+		}
+		err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader(answer)), &output, config.DatabaseConfig{Host: "localhost", User: "root", Databases: []string{"es_extended"}}, setup)
+		if created != approve || saved != approve || (err == nil) != approve {
+			t.Fatalf("approval not enforced: approved=%t created=%t saved=%t err=%v", approve, created, saved, err)
+		}
+		if strings.Contains(output.String(), "generated-private-password") {
+			t.Fatal("generated password leaked")
+		}
+	}
+}
+
+func TestWizardDoesNotGuessUnknownClientHost(t *testing.T) {
+	for _, admin := range []bool{true, false} {
+		var output bytes.Buffer
+		saved := false
+		setup := databaseSetup{
+			inspect: func(context.Context, config.DatabaseConfig) database.Report {
+				r := setupReport(admin)
+				r.ClientHost = ""
+				return r
+			},
+			provision: func(context.Context, config.DatabaseConfig, string, string, string, func(config.DatabaseConfig) error) error {
+				t.Fatal("account creation attempted without a discovered client host")
+				return nil
+			},
+			save: func(config.DatabaseConfig) error { saved = true; return nil },
+		}
+		user := "backup"
+		if admin {
+			user = "root"
+		}
+		err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader("y\n")), &output, config.DatabaseConfig{Host: "localhost", User: user, Databases: []string{"game"}}, setup)
+		if (err == nil) != !admin || saved != !admin || strings.Contains(output.String(), "CREATE USER") {
+			t.Fatalf("unknown client host guessed or existing account blocked: admin=%t saved=%t err=%v", admin, saved, err)
+		}
 	}
 }
 

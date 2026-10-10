@@ -23,7 +23,7 @@ func TestRegisterExchangesSetupToken(t *testing.T) {
 			io.WriteString(w, `{"registration_protocol":"client-credential-v1"}`)
 			return
 		}
-		if r.URL.Path != "/v1/agent/register" || r.Method != http.MethodPost {
+		if r.URL.Path != "/api/v1/agent/register" || r.Method != http.MethodPost {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer ark_tk_setup" {
@@ -114,7 +114,7 @@ func TestEnrollRecoversLostResponseAcrossRestartsWithoutSavingToken(t *testing.T
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		if r.URL.Path == "/v1/agent/heartbeat" {
+		if r.URL.Path == "/api/v1/agent/heartbeat" {
 			if r.Header.Get("Authorization") == "Bearer "+candidate {
 				io.WriteString(w, `{}`)
 			} else {

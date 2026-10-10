@@ -235,7 +235,7 @@ func TestForegroundAgentSendsHeartbeatWithIncompleteLocalSetup(t *testing.T) {
 	const credential = "dac_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	seen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/agent/heartbeat" {
+		if r.URL.Path != "/api/v1/agent/heartbeat" {
 			io.WriteString(w, `{}`)
 			return
 		}

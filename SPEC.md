@@ -148,7 +148,7 @@ only on Windows) — it contains DB credentials and the path to the encryption k
 ### 1. Registration (once, at install)
 
 ```
-POST /v1/agent/register
+POST /api/v1/agent/register
 Authorization: Bearer <enrollment token>
 
 {
@@ -160,7 +160,7 @@ Authorization: Bearer <enrollment token>
 ```
 
 The safe retry protocol first discovers `registration_protocol:
-"client-credential-v1"` using unauthenticated `GET /v1/agent/register`. Its POST
+"client-credential-v1"` using unauthenticated `GET /api/v1/agent/register`. Its POST
 also contains `agent_credential`, a locally generated 256-bit `dac_` candidate.
 The agent protects this candidate in `<config path>.enrollment-pending` before
 the exchange and never persists the enrollment token. The server stores only
@@ -211,7 +211,7 @@ replacement is not interrupted by a later policy change.
 ### 2. Heartbeat (every 60s)
 
 ```
-POST /v1/agent/heartbeat
+POST /api/v1/agent/heartbeat
 Authorization: Bearer <agent credential>
 
 {
@@ -281,7 +281,7 @@ Steps:
 4. Request a presigned upload URL from the control plane:
 
 ```
-POST /v1/backups/initiate
+POST /api/v1/backups/initiate
 Authorization: Bearer <agent credential>
 Idempotency-Key: <stable per-run identity>
 
@@ -302,7 +302,7 @@ unexpired HTTPS upload URL. No object-storage request receives the agent credent
 6. Report completion:
 
 ```
-POST /v1/backups/{backup_id}/complete
+POST /api/v1/backups/{backup_id}/complete
 Authorization: Bearer <agent credential>
 
 {
@@ -432,7 +432,7 @@ db-agent restore --backup-id <id> --output ./restore.sql
 - Downloads the encrypted backup (via a presigned download URL from the control
   plane), decrypts it locally with the key file, decompresses it.
 
-The typed lookup contract is authenticated `GET /v1/backups/{id}/download`,
+The typed lookup contract is authenticated `GET /api/v1/backups/{id}/download`,
 returning HTTP 200 with `{ "download_url": "https://...", "expires_at": "..." }`.
 The URL must be unexpired HTTPS without userinfo/fragment. Lookup and transfer are
 separate: the client does not fetch or forward agent credentials to the returned
@@ -482,7 +482,8 @@ does not wait for the outcome or claim an acknowledged upload.
 The current diagnostic checks config, DB reachability/authentication, numeric
 server version, explicit scope, direct logical dump grants, compatible client
 tooling, local key format/private permissions/fingerprint/acknowledgement, and
-unauthenticated API host reachability independently. It does not execute a backup or verify
+unauthenticated API host reachability at `<api_url>/api/v1/agent/register` independently,
+avoiding dashboard-root login redirects. It does not execute a backup or verify
 agent authentication. See `README.md` for requirements and local fixtures.
 
 ---
@@ -570,12 +571,21 @@ database-level GRANT patterns, escape `_` and `%` in schema names so they cannot
 grant access to similarly named databases. Do not use `CREATE USER IF NOT EXISTS`
 or reset the password of a pre-existing account when retrying setup.
 
-The shared local-TCP wizard also creates a `db_agent_backup` identity for the
-selected loopback IP (`127.0.0.1` or `::1`) with the same password and grants.
-Linux MariaDB and MySQL with name resolution disabled do not necessarily map
-local TCP to `@localhost`. `localhost` input uses IPv4 TCP; no wildcard-host or
-remote-host account is created. Both identities are displayed for approval and
-only identities confirmed created by the current attempt are removed on failure.
+The shared local-TCP wizard discovers the server-observed client host using
+`USER()`, not `CURRENT_USER()` (which may identify a matched wildcard account).
+Destination connections remain restricted to localhost/loopback; `localhost`
+input uses IPv4 TCP. A database behind Docker's published port may see a bridge
+IP instead. In that case, setup creates only a `db_agent_backup` identity for the
+observed exact IP or validated hostname, never a wildcard or subnet. Native
+local connections retain `@localhost` and the observed loopback IP (or the selected
+loopback IP when the server reports localhost), with the same password/grants,
+because Linux MariaDB and MySQL with name resolution disabled do not necessarily
+map local TCP to `@localhost`. All identities are displayed for approval. The
+observed host is rechecked before any writes; a changed host requires a new
+preview and approval. Failed or unsafe host discovery disables automatic creation
+without blocking a verified existing backup account. Only identities confirmed
+created by the current attempt are removed on failure. A recreated Docker network
+may change the bridge address and require configuring a new scoped account.
 
 For MariaDB and MySQL 5.7, use `SELECT ON mysql.proc` for routine visibility instead;
 MariaDB 11.3+ also supports global `SHOW CREATE ROUTINE`. Physical backups need

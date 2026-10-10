@@ -1,6 +1,6 @@
 # Signed agent updates
 
-The agent checks `GET <api_url>/v1/agent/updates?os=<goos>&arch=<goarch>&current_version=<version>` when it starts and every 24 hours while `auto_update: true`. This release feed is public; the pinned signature authenticates it. You can instead set `update_url: "https://releases.example.com/db-agent/{os}-{arch}.json"` in the local config and host the signed JSON as static files. The endpoint returns one manifest for the latest stable release on that platform:
+The agent checks `GET <api_url>/api/v1/agent/updates?os=<goos>&arch=<goarch>&current_version=<version>` when it starts and every 24 hours while `auto_update: true`. This release feed is public; the pinned signature authenticates it. You can instead set `update_url: "https://releases.example.com/db-agent/{os}-{arch}.json"` in the local config and host the signed JSON as static files. The endpoint returns one manifest for the latest stable release on that platform:
 
 ```json
 {

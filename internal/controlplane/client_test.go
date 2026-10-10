@@ -31,7 +31,7 @@ func TestHeartbeatWireContract(t *testing.T) {
 	states := []State{{Status: Idle}, {Status: BackingUp}, {Status: Uploading}, {Status: Error, Problem: SetupIncomplete}}
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/base/v1/agent/heartbeat" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+testCredential || r.Header.Get("Content-Type") != "application/json" {
+		if r.URL.Path != "/base/api/v1/agent/heartbeat" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+testCredential || r.Header.Get("Content-Type") != "application/json" {
 			t.Error("heartbeat did not use the authenticated protocol")
 		}
 		var payload map[string]string

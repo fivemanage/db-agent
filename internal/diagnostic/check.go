@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fivemanage/db-agent/internal/config"
@@ -70,7 +71,8 @@ func CheckAPI(ctx context.Context, apiURL string) database.Check {
 		return check
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	probeURL := strings.TrimRight(apiURL, "/") + "/api/v1/agent/register"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
 		check.Message = "Invalid API URL; check api_url in local config."
 		return check
@@ -85,12 +87,17 @@ func CheckAPI(ctx context.Context, apiURL string) database.Check {
 	defer response.Body.Close()
 
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		check.Message = "Control plane redirected the request; configure the final API base URL (redirects are not followed)."
+		//check.Message = "Control plane redirected the request; configure the final API base URL (redirects are not followed)."
+		check.Message = fmt.Sprintf("Control plane redirected the request; configure the final API base URL (%s).", apiURL)
 		return check
 	}
 
 	if response.StatusCode >= 500 {
 		check.Message = fmt.Sprintf("Control plane returned HTTP %d; retry later or check the API service.", response.StatusCode)
+		return check
+	}
+	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusMethodNotAllowed {
+		check.Message = "Agent API endpoint not found; configure api_url as the dashboard base URL without /api or /api/v1, and verify the agent routes are deployed."
 		return check
 	}
 

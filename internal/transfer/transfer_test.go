@@ -149,7 +149,7 @@ func TestSuccessfulUploadWithRealControlPlane(t *testing.T) {
 		}
 
 		switch r.URL.Path {
-		case "/v1/backups/initiate":
+		case "/api/v1/backups/initiate":
 			identity = r.Header.Get("Idempotency-Key")
 			var in controlplane.InitiateBackupRequest
 			if err := json.Unmarshal(body, &in); err != nil || in.StartedAt.IsZero() ||
@@ -163,7 +163,7 @@ func TestSuccessfulUploadWithRealControlPlane(t *testing.T) {
 				UploadURL: storage.URL + "?signature=secret",
 				ExpiresAt: time.Now().Add(time.Hour),
 			})
-		case "/v1/backups/backup_1/complete":
+		case "/api/v1/backups/backup_1/complete":
 			if err := json.Unmarshal(body, &completion); err != nil {
 				t.Error(err)
 			}

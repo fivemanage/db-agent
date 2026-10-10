@@ -29,12 +29,13 @@ func TestInspectSuccessfulServers(t *testing.T) {
 			}
 			defer db.Close()
 			mock.ExpectPing()
+			mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("backup@localhost"))
 			mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(test.version))
 			mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("game").AddRow("information_schema").AddRow("mysql"))
 			mock.ExpectExec("USE `game`").WillReturnResult(sqlmock.NewResult(0, 0))
 			mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants"}).AddRow("GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `game`.* TO `backup`@`localhost`").AddRow(test.routine))
 			r := inspect(context.Background(), db, candidate())
-			if !r.Passed() || r.Driver != test.driver || len(r.Databases) != 1 || r.Databases[0] != "game" {
+			if !r.Passed() || r.Driver != test.driver || r.ClientHost != "localhost" || len(r.Databases) != 1 || r.Databases[0] != "game" {
 				t.Fatalf("unexpected report: %+v", r)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -82,6 +83,62 @@ func TestInspectConnectionFailures(t *testing.T) {
 	}
 }
 
+func TestClientHostDiscovery(t *testing.T) {
+	for _, test := range []struct{ identity, host string }{
+		{"root@172.19.0.1", "172.19.0.1"},
+		{"user@with@sign@fd00::1", "fd00::1"},
+		{"root@localhost", "localhost"},
+		{"root@docker-host.example", "docker-host.example"},
+		{"root@::ffff:172.19.0.1", "::ffff:172.19.0.1"},
+		{"root@%", ""},
+		{"root@never-print-this'", ""},
+		{"root", ""},
+		{"root@", ""},
+	} {
+		t.Run(test.identity, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow(test.identity))
+			host, err := readClientHost(context.Background(), db)
+			if host != test.host || (err == nil) != (test.host != "") {
+				t.Fatalf("unexpected client host: %q err=%v", host, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "never-print-this") {
+				t.Fatal("unsafe server response leaked")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInspectClientHostDiscoveryDoesNotBlockExistingAccount(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectPing()
+	mock.ExpectQuery("SELECT USER").WillReturnError(errors.New("never-print-this"))
+	mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("8.4.2"))
+	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("game"))
+	mock.ExpectExec("USE `game`").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants"}).
+		AddRow("GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `game`.* TO `backup`@`localhost`").
+		AddRow("GRANT SHOW_ROUTINE ON *.* TO `backup`@`localhost`"))
+	r := inspect(context.Background(), db, candidate())
+	if !r.Passed() || r.ClientHost != "" {
+		t.Fatalf("existing account checks were blocked by host discovery: %+v", r)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInspectSelectionAndGrantFailures(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -101,6 +158,7 @@ func TestInspectSelectionAndGrantFailures(t *testing.T) {
 			}
 			defer db.Close()
 			mock.ExpectPing()
+			mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("backup@127.0.0.1"))
 			mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("8.4.2"))
 			mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("game"))
 			if len(test.selected) > 0 {
@@ -139,6 +197,7 @@ func TestInspectUnsupportedServer(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectPing()
+	mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("backup@127.0.0.1"))
 	mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("5.6.51-secret"))
 	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}))
 	r := inspect(context.Background(), db, config.DatabaseConfig{})

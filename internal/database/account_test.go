@@ -56,6 +56,7 @@ func TestProvisionAccountPersistenceAndRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawErr := errors.New("raw-admin-secret and generated-password")
+			mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("root@127.0.0.1"))
 			create := mock.ExpectExec("^CREATE USER 'db_agent_backup'@'localhost' IDENTIFIED BY '[0-9a-f]{64}'$")
 			if failure == "create" {
 				create.WillReturnError(rawErr)
@@ -80,7 +81,7 @@ func TestProvisionAccountPersistenceAndRollback(t *testing.T) {
 			}
 			persisted := false
 			admin := config.DatabaseConfig{Host: "127.0.0.1", Port: 3306, User: "root", Password: "raw-admin-secret", Databases: []string{"game_db"}}
-			err = provisionAccount(context.Background(), db, admin, "mysql", statements, func(c config.DatabaseConfig) error {
+			err = provisionAccount(context.Background(), db, admin, "mysql", "127.0.0.1", statements, func(c config.DatabaseConfig) error {
 				persisted = true
 				if c.User != "db_agent_backup" || c.Password == admin.Password || len(c.Password) != 64 || c.Databases[0] != "game_db" {
 					t.Fatal("admin credentials passed to persistence or scope changed")
@@ -108,7 +109,7 @@ func TestProvisionAccountPersistenceAndRollback(t *testing.T) {
 
 func TestLocalTCPAccountSQL(t *testing.T) {
 	for _, host := range []string{"localhost", "127.0.0.1", "::1"} {
-		statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game_db"}, host)
+		statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game_db"}, host, host)
 		if err != nil || len(statements) != 6 {
 			t.Fatalf("local plan failed: %v", err)
 		}
@@ -121,8 +122,139 @@ func TestLocalTCPAccountSQL(t *testing.T) {
 			t.Fatal("TCP identity not scoped to selected loopback IP and database")
 		}
 	}
-	if _, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "remote.example"); err == nil {
+	if _, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "remote.example", "127.0.0.1"); err == nil {
 		t.Fatal("remote backup identity accepted")
+	}
+}
+
+func TestObservedClientHostAccountSQL(t *testing.T) {
+	for _, test := range []struct {
+		name, destination, observed string
+		hosts                       []string
+	}{
+		{"Docker IPv4 bridge", "localhost", "172.19.0.1", []string{"172.19.0.1"}},
+		{"IPv6 bridge", "::1", "fd00::1", []string{"fd00::1"}},
+		{"resolved client", "127.0.0.1", "docker-host.example", []string{"docker-host.example"}},
+		{"native resolved IPv6", "::1", "localhost", []string{"localhost", "::1"}},
+		{"different loopback source", "127.0.0.1", "127.0.0.2", []string{"localhost", "127.0.0.2"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			statements, err := LocalBackupAccountSQL("mariadb", "11.4.13", []string{"es_extended"}, test.destination, test.observed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(statements) != 3*len(test.hosts) {
+				t.Fatalf("unexpected identity count: %v", statements)
+			}
+			for i, host := range test.hosts {
+				account := "'db_agent_backup'@'" + host + "'"
+				if statements[3*i] != "CREATE USER "+account+" IDENTIFIED BY '<generated password>'" ||
+					statements[3*i+1] != "GRANT SELECT, SHOW VIEW, EVENT, TRIGGER ON `es\\_extended`.* TO "+account ||
+					statements[3*i+2] != "GRANT SHOW CREATE ROUTINE ON *.* TO "+account {
+					t.Fatalf("plan did not restrict grants to the observed host and schema: %v", statements)
+				}
+			}
+		})
+	}
+	for _, host := range []string{"", "%", "172.19.%", "172.19.0.0/16", "host_name", "host' OR '1'='1", "host\\name", "host\nname", "::1%eth0", "0.0.0.0", "::", "ff02::1", "-host", "host-", "host..example"} {
+		if _, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "localhost", host); err == nil {
+			t.Fatalf("unsafe client host accepted: %q", host)
+		}
+	}
+}
+
+func TestProvisionBridgeAccountPersistenceAndRollback(t *testing.T) {
+	for _, failure := range []string{"", "create", "grant", "persist", "cleanup"} {
+		t.Run(failure, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			admin := config.DatabaseConfig{Host: "localhost", Port: 3306, User: "root", Password: "private-admin-password", Databases: []string{"game_db"}}
+			statements, err := LocalBackupAccountSQL("mariadb", "11.4.13", admin.Databases, admin.Host, "172.19.0.1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("root@172.19.0.1"))
+			rawErr := errors.New("private-admin-password generated-password")
+			for i, statement := range statements {
+				pattern := strings.ReplaceAll(regexp.QuoteMeta(statement), regexp.QuoteMeta("<generated password>"), "[0-9a-f]{64}")
+				expected := mock.ExpectExec("^" + pattern + "$")
+				if failure == "create" && i == 0 || failure == "grant" && i == 1 {
+					expected.WillReturnError(rawErr)
+					break
+				}
+				expected.WillReturnResult(sqlmock.NewResult(0, 0))
+			}
+			if failure != "" && failure != "create" {
+				drop := mock.ExpectExec("^" + regexp.QuoteMeta("DROP USER 'db_agent_backup'@'172.19.0.1'") + "$")
+				if failure == "cleanup" {
+					drop.WillReturnError(rawErr)
+				} else {
+					drop.WillReturnResult(sqlmock.NewResult(0, 0))
+				}
+			}
+			saved := false
+			err = provisionAccount(context.Background(), db, admin, "mariadb", "172.19.0.1", statements, func(c config.DatabaseConfig) error {
+				saved = true
+				if c.Host != "127.0.0.1" || c.Port != admin.Port || c.User != "db_agent_backup" || c.Password == admin.Password || len(c.Password) != 64 {
+					t.Fatal("backup settings lost the local destination or reused admin credentials")
+				}
+				if failure == "persist" || failure == "cleanup" {
+					return errors.New("private config could not be saved")
+				}
+				return nil
+			})
+			if (err == nil) != (failure == "") || saved != (failure == "" || failure == "persist" || failure == "cleanup") {
+				t.Fatalf("unexpected provisioning outcome: saved=%t err=%v", saved, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "private-admin-password") {
+				t.Fatal("raw DB error leaked")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestProvisionRequiresApprovedClientHost(t *testing.T) {
+	for _, test := range []struct {
+		name, identity, want string
+		err                  error
+	}{
+		{"changed bridge address", "root@172.20.0.1", "client host changed after SQL approval", nil},
+		{"unsafe response", "root@never-print-this'%", "safe exact client host", nil},
+		{"discovery failed", "", "could not determine", errors.New("never-print-this")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			query := mock.ExpectQuery("SELECT USER")
+			if test.err != nil {
+				query.WillReturnError(test.err)
+			} else {
+				query.WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow(test.identity))
+			}
+			statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "localhost", "172.19.0.1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = provisionAccount(context.Background(), db, config.DatabaseConfig{Host: "localhost"}, "mysql", "172.19.0.1", statements, func(config.DatabaseConfig) error {
+				t.Fatal("unapproved host reached persistence")
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "never-print-this") {
+				t.Fatalf("host change or unsafe response was not rejected safely: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -132,10 +264,11 @@ func TestExistingTCPIdentityIsNotAlteredOrRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "127.0.0.1")
+	statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "127.0.0.1", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("root@127.0.0.1"))
 	mock.ExpectExec("^CREATE USER 'db_agent_backup'@'localhost' IDENTIFIED BY '[0-9a-f]{64}'$").WillReturnResult(sqlmock.NewResult(0, 0))
 	for _, statement := range statements[1:3] {
 		mock.ExpectExec("^" + regexp.QuoteMeta(statement) + "$").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -143,7 +276,7 @@ func TestExistingTCPIdentityIsNotAlteredOrRemoved(t *testing.T) {
 	mock.ExpectExec("^CREATE USER 'db_agent_backup'@'127.0.0.1' IDENTIFIED BY '[0-9a-f]{64}'$").WillReturnError(errors.New("already exists"))
 	// The failed TCP CREATE is ambiguous/existing. Only @localhost is ours.
 	mock.ExpectExec("^" + regexp.QuoteMeta("DROP USER "+backupAccount) + "$").WillReturnResult(sqlmock.NewResult(0, 0))
-	err = provisionAccount(context.Background(), db, config.DatabaseConfig{Host: "127.0.0.1"}, "mysql", statements, func(config.DatabaseConfig) error { t.Fatal("persistence called for failed TCP creation"); return nil })
+	err = provisionAccount(context.Background(), db, config.DatabaseConfig{Host: "127.0.0.1"}, "mysql", "127.0.0.1", statements, func(config.DatabaseConfig) error { t.Fatal("persistence called for failed TCP creation"); return nil })
 	if err == nil {
 		t.Fatal("existing TCP identity creation accepted")
 	}
@@ -158,10 +291,11 @@ func TestBothCreatedIdentitiesRollbackWhenVerificationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "127.0.0.1")
+	statements, err := LocalBackupAccountSQL("mysql", "8.4.0", []string{"game"}, "127.0.0.1", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT USER").WillReturnRows(sqlmock.NewRows([]string{"user"}).AddRow("root@127.0.0.1"))
 	for _, statement := range statements {
 		if strings.HasPrefix(statement, "CREATE USER ") {
 			pattern := strings.ReplaceAll(regexp.QuoteMeta(statement), regexp.QuoteMeta("<generated password>"), "[0-9a-f]{64}")
@@ -172,7 +306,7 @@ func TestBothCreatedIdentitiesRollbackWhenVerificationFails(t *testing.T) {
 	}
 	mock.ExpectExec("^" + regexp.QuoteMeta("DROP USER 'db_agent_backup'@'127.0.0.1'") + "$").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("^" + regexp.QuoteMeta("DROP USER "+backupAccount) + "$").WillReturnResult(sqlmock.NewResult(0, 0))
-	err = provisionAccount(context.Background(), db, config.DatabaseConfig{Host: "127.0.0.1"}, "mysql", statements, func(config.DatabaseConfig) error { return errors.New("verification failed") })
+	err = provisionAccount(context.Background(), db, config.DatabaseConfig{Host: "127.0.0.1"}, "mysql", "127.0.0.1", statements, func(config.DatabaseConfig) error { return errors.New("verification failed") })
 	if err == nil {
 		t.Fatal("failed verification accepted")
 	}

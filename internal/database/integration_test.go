@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +17,8 @@ import (
 	"github.com/fivemanage/db-agent/internal/config"
 )
 
-// Run this test inside each isolated fixture container: the generated account
-// is intentionally @localhost, not accessible through a Docker bridge address.
+// Run this test inside each isolated fixture container to cover native local
+// account provisioning and dumping separately from host-side bridge connections.
 func TestProvisionedLocalAccountCanDump(t *testing.T) {
 	if os.Getenv("DB_AGENT_PROVISION_INTEGRATION") != "1" {
 		t.Skip("run the static test binary inside a diagnostic fixture with DB_AGENT_PROVISION_INTEGRATION=1")
@@ -53,7 +54,7 @@ func TestProvisionedLocalAccountCanDump(t *testing.T) {
 	defer db.ExecContext(ctx, "DROP TRIGGER diagnostic_game.setup_trigger")
 	defer db.ExecContext(ctx, "DROP EVENT diagnostic_game.setup_event")
 	var backup config.DatabaseConfig
-	err = ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, func(c config.DatabaseConfig) error {
+	err = ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, r.ClientHost, func(c config.DatabaseConfig) error {
 		verified := Inspect(ctx, c)
 		if !verified.Passed() || verified.Administrative {
 			return fmt.Errorf("generated-account diagnostics failed: %+v", verified.Checks)
@@ -67,7 +68,7 @@ func TestProvisionedLocalAccountCanDump(t *testing.T) {
 	defer db.ExecContext(ctx, "DROP USER "+backupAccount)
 	defer db.ExecContext(ctx, "DROP USER 'db_agent_backup'@'127.0.0.1'")
 	// Rerunning creation must not change the existing account or invoke save.
-	if err := ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, func(config.DatabaseConfig) error { t.Fatal("existing account was replaced"); return nil }); err == nil {
+	if err := ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, r.ClientHost, func(config.DatabaseConfig) error { t.Fatal("existing account was replaced"); return nil }); err == nil {
 		t.Fatal("existing account creation accepted")
 	}
 	if !Inspect(ctx, backup).Passed() {
@@ -100,6 +101,95 @@ func TestProvisionedLocalAccountCanDump(t *testing.T) {
 	}
 }
 
+func TestProvisionedBridgeAccount(t *testing.T) {
+	if os.Getenv("DB_AGENT_INTEGRATION") != "1" {
+		t.Skip("start docker-compose.diagnostics.yml and set DB_AGENT_INTEGRATION=1")
+	}
+	for _, server := range []struct {
+		driver, env string
+		port        int
+	}{
+		{"mariadb", "DB_AGENT_MARIADB_PORT", 13306},
+		{"mysql", "DB_AGENT_MYSQL_PORT", 13307},
+	} {
+		t.Run(server.driver, func(t *testing.T) {
+			ctx := context.Background()
+			admin := config.DatabaseConfig{Driver: "mysql", Host: "localhost", Port: fixturePort(t, server.env, server.port), User: "root", Password: "diagnostics_root", Databases: []string{"diagnostic_game"}}
+			r := Inspect(ctx, admin)
+			if !r.Passed() || !r.CanCreateUser || r.Driver != server.driver {
+				t.Fatalf("fixture admin checks failed: %+v", r)
+			}
+			if ip := net.ParseIP(r.ClientHost); r.ClientHost == "" || r.ClientHost == "localhost" || ip != nil && ip.IsLoopback() {
+				t.Fatalf("fixture is not exercising a Docker bridge connection: %q", r.ClientHost)
+			}
+			statements, err := LocalBackupAccountSQL(r.Driver, r.Version, admin.Databases, admin.Host, r.ClientHost)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err := openDatabase(admin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var backup config.DatabaseConfig
+			err = ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, r.ClientHost, func(c config.DatabaseConfig) error {
+				verified := Inspect(ctx, c)
+				if !verified.Passed() || verified.Administrative || verified.ClientHost != r.ClientHost {
+					return fmt.Errorf("generated bridge-account diagnostics failed: %+v", verified.Checks)
+				}
+				if c.Host != "127.0.0.1" || c.Port != admin.Port {
+					return fmt.Errorf("generated bridge account changed the local destination")
+				}
+				backup = c
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				for _, statement := range statements {
+					if account, ok := strings.CutPrefix(statement, "CREATE USER "); ok {
+						account, _, _ = strings.Cut(account, " IDENTIFIED BY ")
+						if _, err := db.ExecContext(ctx, "DROP USER "+account); err != nil {
+							t.Error("could not remove generated bridge fixture account")
+						}
+					}
+				}
+			}()
+			var host string
+			if err := db.QueryRowContext(ctx, "SELECT Host FROM mysql.user WHERE User = 'db_agent_backup'").Scan(&host); err != nil || host != r.ClientHost {
+				t.Fatalf("generated account does not use the observed exact host: %q", host)
+			}
+			if err := ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, r.ClientHost, func(config.DatabaseConfig) error {
+				t.Fatal("existing bridge account was replaced")
+				return nil
+			}); err == nil {
+				t.Fatal("existing bridge account creation accepted")
+			}
+			if !Inspect(ctx, backup).Passed() {
+				t.Fatal("existing bridge account password was rotated")
+			}
+			outsideScope := backup
+			outsideScope.Databases = []string{"diagnostic_hidden"}
+			if Inspect(ctx, outsideScope).Passed() {
+				t.Fatal("bridge account can access a database outside the confirmed scope")
+			}
+		})
+	}
+}
+
+func fixturePort(t *testing.T, env string, fallback int) int {
+	t.Helper()
+	if value := os.Getenv(env); value != "" {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	return fallback
+}
+
 func TestLocalDatabaseFixtures(t *testing.T) {
 	if os.Getenv("DB_AGENT_INTEGRATION") != "1" {
 		t.Skip("start docker-compose.diagnostics.yml and set DB_AGENT_INTEGRATION=1")
@@ -112,14 +202,7 @@ func TestLocalDatabaseFixtures(t *testing.T) {
 		{"mysql", "DB_AGENT_MYSQL_PORT", 13307},
 	} {
 		t.Run(server.driver, func(t *testing.T) {
-			port := server.port
-			if value := os.Getenv(server.env); value != "" {
-				var err error
-				port, err = strconv.Atoi(value)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
+			port := fixturePort(t, server.env, server.port)
 			base := config.DatabaseConfig{Driver: "mysql", Host: "127.0.0.1", Port: port, User: "diagnostic_backup", Password: "diagnostics_backup", Databases: []string{"diagnostic_game"}}
 			t.Run("success", func(t *testing.T) {
 				r := Inspect(context.Background(), base)

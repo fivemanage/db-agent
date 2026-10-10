@@ -17,6 +17,19 @@ client credentials, timeouts, process-tree cancellation, and output throttling.
 It is wired into `backup --now`. See [DUMP.md](DUMP.md) for its contract,
 consistency limits, and real MySQL/MariaDB integration tests.
 
+## Build
+
+```sh
+make build      # current platform: bin/db-agent (bin/db-agent.exe on Windows)
+make build-all  # Windows amd64, Linux amd64/arm64, macOS arm64 binaries in bin/
+make check      # Go tests and vet
+```
+
+Builds default to version `dev`; override it with `make build VERSION=0.1.0`.
+These are unsigned development builds. Use `scripts/build-release.sh` for signed
+release artifacts and manifests. `go run . <command>` compiles the current source
+automatically, so it does not require a separate build.
+
 ## Register and connect
 
 ```sh
@@ -30,6 +43,11 @@ service account (Administrator on Windows for the private config). The setup
 commands also run on Linux. The shared runtime supports Windows Service, Linux
 systemd, and macOS launchd; Linux distribution/installation validation remains
 DEV-508 work.
+
+For the local dashboard, set `api_url: "http://localhost:3000"`, without `/api`
+or `/api/v1`. The agent appends `/api/v1/agent/...` and `/api/v1/backups/...` itself.
+The dashboard retains `/v1/...` as direct compatibility aliases for older agents;
+new agents use `/api/v1/...` without redirects.
 
 `install` saves the issued agent credential **before** database setup. Rerunning
 it resumes without another one-time token and preserves existing database
@@ -52,14 +70,19 @@ confirmation, and tests the selected application database before changing SQL
 or saving database settings. Nothing is implicitly selected.
 
 If the supplied account has direct `CREATE USER` permission, the wizard offers
-to create `db_agent_backup@localhost` with a cryptographically generated password
-after showing the SQL and requiring explicit approval. A second identity for the
-selected loopback IP (`127.0.0.1` or `::1`) receives the same password/grants:
-Linux MariaDB and MySQL with name resolution disabled do not necessarily match
-local TCP to `@localhost`. `localhost` input is pinned to IPv4 TCP. No remote-host
-or wildcard-host identity is created. It does **not** alter an existing account
-or reset its password. Schema grants escape wildcard characters
-to restrict access to the confirmed database. The new account is tested before
+to create `db_agent_backup` with a cryptographically generated password after
+showing the SQL and requiring explicit approval. It uses `USER()` to discover
+the exact client host seen by the database. For Docker-published ports, this is
+typically a bridge address rather than localhost; only that exact address gets
+an account. Native local connections retain both `@localhost` and the observed
+loopback IP (or selected loopback IP when the server reports localhost), with
+the same password/grants, to handle name-resolution differences. Destination
+connections remain loopback-only, and `localhost` input is pinned to IPv4 TCP.
+No wildcard-host identity is created. Setup rechecks the observed host before
+creating any accounts and requires fresh approval if it changes. If discovery
+fails or reports an unsafe host, use an existing backup account instead. It does
+**not** alter an existing account or reset its password. Schema grants escape
+wildcard characters to restrict access to the confirmed database. The new account is tested before
 saving; grant, verification, or config-save failure removes only the identities
 confirmed created by that attempt. If cleanup fails, ask a local administrator
 to inspect and remove those new identities before retrying. An ambiguous CREATE
@@ -148,7 +171,7 @@ will not replace it. Uninstall preserves it and its acknowledgement.
 
 This is a foreground process on both Windows and Linux, **not an installed
 service**. After startup diagnostics, it sends an immediate authenticated
-heartbeat to `/v1/agent/heartbeat`, then polls every 60 seconds. It uses only the
+heartbeat to `/api/v1/agent/heartbeat`, then polls every 60 seconds. It uses only the
 issued `dac_` credential, agent version, activity, classified error messages, and
 optional discovered DB driver/numeric version.
 Database credentials, database names, key material/paths, and raw diagnostic
@@ -306,7 +329,7 @@ target OS is still required; unit tests use fake service managers.
 
 Registration, heartbeat, and typed backup/restore lookups share the same bounded,
 authenticated HTTP transport. Registration first negotiates
-`GET /v1/agent/register` with `registration_protocol: client-credential-v1`.
+`GET /api/v1/agent/register` with `registration_protocol: client-credential-v1`.
 An older server is rejected **before** receiving the setup token. The agent
 generates a 256-bit candidate credential locally and keeps it in
 `<config path>.enrollment-pending`, protected with Unix `0600` or the same Windows
@@ -339,8 +362,8 @@ or interrupt an already authorized replacement. Scheduling uses the saved policy
 and applies heartbeat schedule changes on its next clock sample; local schedule edits are
 reread on restart.
 
-Typed client methods define `POST /v1/backups/initiate`,
-`POST /v1/backups/{id}/complete`, and `GET /v1/backups/{id}/download`.
+Typed client methods define `POST /api/v1/backups/initiate`,
+`POST /api/v1/backups/{id}/complete`, and `GET /api/v1/backups/{id}/download`.
 Initiation requires an `Idempotency-Key` persisted once per backup run by the
 future orchestrator. Completion must be idempotent for the same terminal outcome.
 The client validates resource IDs, metadata, checksums, and unexpired HTTPS
@@ -383,8 +406,10 @@ Use `db-agent configure --key` to set up and acknowledge the local recovery key.
 Diagnostics verify its encoding, private Unix permissions/Windows ACLs, saved
 fingerprint, and acknowledgement. Never upload this file or
 paste it into support tickets. API reachability makes an unauthenticated GET to
-the configured base URL, sends no agent/DB secrets, and does not follow redirects.
-HTTP 4xx proves the host is reachable, not that agent authentication works.
+`<api_url>/api/v1/agent/register`, not the dashboard root, sends no agent/DB secrets,
+and does not follow redirects.
+HTTP 404/405 fails because the agent endpoint is missing. Other HTTP 4xx only
+proves the host is reachable, not that agent authentication works.
 
 ## Development checks
 
@@ -394,8 +419,9 @@ go vet ./...
 ```
 
 Isolated local integration fixtures cover MySQL 8.4 and MariaDB 11.4, including
-bad passwords, missing/hidden databases, and insufficient privileges. These
-containers use development-only credentials, publish loopback-only ports, and
+bad passwords, missing/hidden databases, insufficient privileges, and automatic
+account creation through Docker's published ports using the observed bridge host.
+These containers use development-only credentials, publish loopback-only ports, and
 do not reuse the main development database or its volume.
 
 ```sh
@@ -407,9 +433,9 @@ docker compose -p db-agent-diagnostics -f docker-compose.diagnostics.yml down --
 Optional `DB_AGENT_MYSQL_PORT` and `DB_AGENT_MARIADB_PORT` override fixture ports.
 See `SPEC.md` for the MVP plan and `UPDATE.md` for signed updates.
 
-To test actual local-account creation and logical dumps, run a static test binary
-inside each isolated fixture (the `@localhost`/loopback identities intentionally
-cannot authenticate through the host's Docker bridge connection):
+To also test native local-account creation and logical dumps, run a static test
+binary inside each isolated fixture. This exercises `@localhost`/loopback
+identities separately from the host-side bridge-account test above:
 
 ```sh
 CGO_ENABLED=0 go test -c -tags integration -o /tmp/opencode/db-agent-database.test ./internal/database

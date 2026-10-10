@@ -16,7 +16,7 @@ import (
 
 func TestHeartbeatScheduleOverrideIsSavedAndUsedByScheduler(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/agent/heartbeat" {
+		if r.URL.Path != "/api/v1/agent/heartbeat" {
 			t.Error("unexpected control-plane request")
 		}
 		io.WriteString(w, `{"config_overrides":{"backup":{"schedule":"0 5 * * *"}}}`)
