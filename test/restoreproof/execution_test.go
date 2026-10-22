@@ -210,9 +210,20 @@ func TestExecutorImportFailureAndTimeoutCannotBecomeSuccess(t *testing.T) {
 }
 
 func TestExecutorCommitsTableOnlyDataWhenServerAutocommitIsOff(t *testing.T) {
+	for _, mode := range []string{"native", "native_autocommit_bookkeeping"} {
+		t.Run(mode, func(t *testing.T) { testExecutorCommitsTableData(t, mode == "native_autocommit_bookkeeping") })
+	}
+}
+
+func testExecutorCommitsTableData(t *testing.T, autocommitBookkeeping bool) {
 	f := newFixture(t)
 	f.tables(f.admin, f.source)
-	x := newExecutionFixture(f, f.nativeDump())
+	plain := f.nativeDump()
+	if autocommitBookkeeping {
+		plain = append([]byte("/*!40101 SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, AUTOCOMMIT=0 */;\n"), plain...)
+		plain = append(plain, []byte("\nCOMMIT;\n/*!40101 SET AUTOCOMMIT=@OLD_AUTOCOMMIT */;\n")...)
+	}
+	x := newExecutionFixture(f, plain)
 	registerExecutionCleanup(x)
 	previous := f.scalar(f.admin, "SELECT @@global.autocommit")
 	f.exec(f.admin, "SET GLOBAL autocommit = 0")

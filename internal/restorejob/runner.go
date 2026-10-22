@@ -37,7 +37,7 @@ type Runner struct {
 }
 
 func NewRunner(path string, binding Binding, lookup restore.Lookup, options Options) (*Runner, error) {
-	if lookup == nil || options.Timeout < 0 || options.StatementTimeout < 0 || options.MaxSQLBytes < 0 || options.MaxSQLBytes > 1<<30 {
+	if lookup == nil || options.Timeout < 0 || options.StatementTimeout < 0 || options.MaxSQLBytes < 0 || options.MaxSQLBytes > restoreplan.DefaultMaxInputBytes {
 		return nil, ErrInvalid
 	}
 	if options.Timeout == 0 {
@@ -48,6 +48,9 @@ func NewRunner(path string, binding Binding, lookup restore.Lookup, options Opti
 	}
 	if options.Download.MaxOutputBytes == 0 || options.Download.MaxOutputBytes > options.MaxSQLBytes {
 		options.Download.MaxOutputBytes = options.MaxSQLBytes
+	}
+	if options.Download.MaxInputBytes == 0 {
+		options.Download.MaxInputBytes = restoreplan.DefaultMaxInputBytes
 	}
 	if _, err := restore.New(lookup, options.Download); err != nil {
 		return nil, ErrInvalid
@@ -129,11 +132,7 @@ func (r *Runner) execute(ctx context.Context, session *Session, job Job) (err er
 		return errStorage
 	}
 	output := filepath.Join(dir, "verified.sql")
-	cleaned := false
 	defer func() {
-		if cleaned {
-			return
-		}
 		removeErr, dirErr := os.Remove(output), os.Remove(dir)
 		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) || dirErr != nil && !errors.Is(dirErr, os.ErrNotExist) {
 			err = errStorage
@@ -159,14 +158,12 @@ func (r *Runner) execute(ctx context.Context, session *Session, job Job) (err er
 	if err != nil {
 		return errStorage
 	}
-	plan, planErr := restoreplan.Prepare(ctx, file, restoreplan.Options{Driver: settings.Database.Driver, Source: settings.Database.Databases[0], Destination: job.Destination(), MaxInputBytes: r.options.MaxSQLBytes})
-	closeErr := file.Close()
-	removeErr := os.Remove(output)
-	dirErr := os.Remove(dir)
-	if closeErr != nil || removeErr != nil || dirErr != nil {
-		return errStorage
-	}
-	cleaned = true
+	defer func() {
+		if file.Close() != nil {
+			err = errStorage
+		}
+	}()
+	plan, planErr := restoreplan.PrepareFile(ctx, file, restoreplan.Options{Driver: settings.Database.Driver, Source: settings.Database.Databases[0], Destination: job.Destination(), MaxInputBytes: r.options.MaxSQLBytes})
 	if planErr != nil {
 		return planErr
 	}
@@ -232,7 +229,7 @@ func executionProblem(err error, state State) Problem {
 		return UnsafeImport
 	case errors.Is(err, restore.ErrIntegrity), errors.Is(err, restore.ErrFormat), errors.Is(err, ErrTransition):
 		return ArtifactInvalid
-	case errors.Is(err, errStorage), errors.Is(err, ErrState), errors.Is(err, restore.ErrCleanup):
+	case errors.Is(err, errStorage), errors.Is(err, ErrState), errors.Is(err, restore.ErrCleanup), errors.Is(err, restoreplan.ErrInput):
 		return LocalUnavailable
 	case errors.Is(err, restore.ErrLimit), errors.Is(err, restoreplan.ErrLimit):
 		return ResourceLimit

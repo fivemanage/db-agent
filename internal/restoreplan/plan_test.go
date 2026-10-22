@@ -243,7 +243,7 @@ func TestSchemaBindingAndOptionsFailClosed(t *testing.T) {
 		func(o *Options) { o.Source = o.Destination },
 		func(o *Options) { o.Destination = "original" },
 		func(o *Options) { o.MaxInputBytes = -1 },
-		func(o *Options) { o.MaxInputBytes = 1<<30 + 1 },
+		func(o *Options) { o.MaxInputBytes = DefaultMaxInputBytes + 1 },
 		func(o *Options) { o.MaxStatementBytes = -1 },
 		func(o *Options) { o.MaxTables = -1 },
 		func(o *Options) { o.MaxStatements = -1 },
@@ -328,7 +328,9 @@ type failedReader struct{ err error }
 func (r *failedReader) Read([]byte) (int, error) { return 0, r.err }
 
 func FuzzPrepare(f *testing.F) {
-	for _, seed := range []string{header + simpleTable, header + simpleTable + viewSession + simpleView, "/*!999999 SELECT 1 */;", "/*M!999999\\- enable sandbox mode */", `SELECT 'quoted\'';`} {
+	for _, seed := range []string{header + simpleTable, header + simpleTable + viewSession + simpleView,
+		header + simpleTable + "SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, AUTOCOMMIT=0; INSERT INTO players VALUES (1,'data',NULL); COMMIT; SET AUTOCOMMIT=@OLD_AUTOCOMMIT;",
+		"/*!999999 SELECT 1 */;", "/*M!999999\\- enable sandbox mode */", `SELECT 'quoted\'';`} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, input string) {

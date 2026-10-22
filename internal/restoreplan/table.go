@@ -22,30 +22,45 @@ func (b *builder) createTable(node *sqlparser.CreateTable) error {
 		return ErrUnsupported
 	}
 	columns := make(map[string]bool)
+	fulltextColumns := make(map[string]bool)
 	for _, column := range spec.Columns {
 		key := strings.ToLower(column.Name.String())
 		if !identifier(column.Name.String()) || columns[key] || !columnType(column.Type) {
 			return ErrUnsupported
 		}
 		columns[key] = true
+		switch strings.ToLower(column.Type.Type) {
+		case "char", "varchar", "tinytext", "text", "mediumtext", "longtext":
+			fulltextColumns[key] = true
+		}
 	}
 	for _, index := range spec.Indexes {
-		if index.Info == nil || (index.Info.Type != sqlparser.IndexTypePrimary && index.Info.Type != sqlparser.IndexTypeUnique && index.Info.Type != sqlparser.IndexTypeDefault) {
+		if index.Info == nil || (index.Info.Type != sqlparser.IndexTypePrimary && index.Info.Type != sqlparser.IndexTypeUnique && index.Info.Type != sqlparser.IndexTypeDefault && index.Info.Type != sqlparser.IndexTypeFullText) {
 			return ErrUnsupported
 		}
 		for _, column := range index.Columns {
 			if column.Expression != nil || !columns[strings.ToLower(column.Column.String())] {
 				return ErrUnsupported
 			}
+			if index.Info.Type == sqlparser.IndexTypeFullText && (column.Length != nil || !fulltextColumns[column.Column.Lowered()]) {
+				return ErrUnsupported
+			}
 		}
 		for _, option := range index.Options {
-			if !strings.EqualFold(option.Name, "comment") && !(strings.EqualFold(option.Name, "using") && strings.EqualFold(option.String, "btree")) {
+			if !strings.EqualFold(option.Name, "comment") && !(index.Info.Type != sqlparser.IndexTypeFullText && strings.EqualFold(option.Name, "using") && strings.EqualFold(option.String, "btree")) {
 				return ErrUnsupported
 			}
 		}
 	}
 	table := &tablePlan{create: node, parents: make(map[string]bool)}
 	for _, constraint := range spec.Constraints {
+		if check, ok := constraint.Details.(*sqlparser.CheckConstraintDefinition); ok {
+			if !jsonColumnCheck(check, columns) {
+				return ErrUnsupported
+			}
+			b.jsonChecks = true
+			continue
+		}
 		fk, ok := constraint.Details.(*sqlparser.ForeignKeyDefinition)
 		if !ok || fk.ReferenceDefinition == nil || len(fk.Source) != len(fk.ReferenceDefinition.ReferencedColumns) || len(fk.Source) == 0 {
 			return ErrUnsupported
@@ -66,6 +81,15 @@ func (b *builder) createTable(node *sqlparser.CreateTable) error {
 	node.Table = b.destination(node.Table)
 	b.tables[name] = table
 	return nil
+}
+
+func jsonColumnCheck(check *sqlparser.CheckConstraintDefinition, columns map[string]bool) bool {
+	function, ok := check.Expr.(*sqlparser.JSONAttributesExpr)
+	if !check.Enforced || !ok || function.Type != sqlparser.ValidAttributeType || function.Path != nil {
+		return false
+	}
+	column, ok := function.JSONDoc.(*sqlparser.ColName)
+	return ok && column.Qualifier.IsEmpty() && columns[column.Name.Lowered()]
 }
 
 func tableOptions(options sqlparser.TableOptions) bool {
@@ -211,6 +235,10 @@ func (b *builder) insert(node *sqlparser.Insert) error {
 		return ErrLimit
 	}
 	table.rows += int64(len(rows))
-	table.data = append(table.data, statement)
+	if b.input != nil {
+		table.data = append(table.data, b.current)
+	} else {
+		table.data = append(table.data, plannedStatement{sql: statement})
+	}
 	return nil
 }

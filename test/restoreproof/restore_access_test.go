@@ -5,6 +5,8 @@ package restoreproof
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +17,87 @@ import (
 
 const provisioningPrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW"
 const provisioningScope = "`fm\\_restore\\_%`.*"
+
+func TestInstallRestoreAccountProvisioningPreservesBackupAndProduction(t *testing.T) {
+	f := newFixture(t)
+	f.tables(f.admin, f.source)
+	backup, _ := authorityFixture(f, "")
+	before, grantsBefore := f.snapshotSchema(false), backupGrantHash(f, backup)
+	admin := backup
+	admin.User, admin.Password = "root", rootPassword
+	report := database.Inspect(f.ctx, admin)
+	if report.ClientHost == "" || !report.CanCreateUser {
+		t.Fatal("cannot inspect the disposable installer connection")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.SaveEnrollment(path, "https://control.example", "issued-fixture-credential"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveDatabase(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	var access config.RestoreConfig
+	err := database.ProvisionRestoreAccount(f.ctx, admin, backup, report.ClientHost, func(candidate config.RestoreConfig) error {
+		if err := database.CheckRestoreAccess(f.ctx, backup, candidate); err != nil {
+			return err
+		}
+		if err := config.SaveRestoreAccess(path, backup, candidate); err != nil {
+			return err
+		}
+		access = candidate
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("installer could not provision verified restore access: %v", err)
+	}
+	t.Cleanup(func() { f.exec(f.admin, "DROP USER 'db_agent_restore'@'"+report.ClientHost+"'") })
+	saved, err := config.LoadDiagnostic(path)
+	if err != nil || saved.Restore.Password != access.Password || saved.Database.Password != backup.Password || saved.Restore.ValidateFor(backup) != nil {
+		t.Fatal("installer did not save separate server-bound credentials")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(data, []byte(rootPassword)) {
+		t.Fatal("temporary installer administrator credentials were saved")
+	}
+	authority := openDB(t, access.User, access.Password)
+	if _, err := authority.ExecContext(f.ctx, "SELECT * FROM "+qi(f.source)+".players"); !permissionDenied(err) {
+		t.Fatal("installed restore authority can read production")
+	}
+	if err := database.ProvisionRestoreAccount(f.ctx, admin, backup, report.ClientHost, func(config.RestoreConfig) error {
+		t.Fatal("existing restore account was overwritten")
+		return nil
+	}); err == nil {
+		t.Fatal("installer accepted an existing restore account")
+	}
+	if err := database.CheckRestoreAccess(f.ctx, backup, access); err != nil {
+		t.Fatal("failed duplicate provisioning changed the existing restore account")
+	}
+	if f.snapshotSchema(false) != before || backupGrantHash(f, backup) != grantsBefore {
+		t.Fatal("installer changed production or backup grants")
+	}
+}
+
+func TestInstallRestoreAccountIsRemovedWhenPrivateSaveFails(t *testing.T) {
+	f := newFixture(t)
+	backup, _ := authorityFixture(f, "")
+	admin := backup
+	admin.User, admin.Password = "root", rootPassword
+	report := database.Inspect(f.ctx, admin)
+	checked := false
+	err := database.ProvisionRestoreAccount(f.ctx, admin, backup, report.ClientHost, func(access config.RestoreConfig) error {
+		if err := database.CheckRestoreAccess(f.ctx, backup, access); err != nil {
+			return err
+		}
+		checked = true
+		return errors.New("private config save failed")
+	})
+	if err == nil || !checked {
+		t.Fatal("failed save did not reject a newly verified account")
+	}
+	if f.scalar(f.admin, "SELECT COUNT(*) FROM mysql.user WHERE User = 'db_agent_restore'") != 0 {
+		t.Fatal("failed installer attempt left its new restore account behind")
+	}
+}
 
 func authorityFixture(f *fixture, mode string) (config.DatabaseConfig, config.RestoreConfig) {
 	backupUser, authorityUser := f.user+"_backup", f.user+"_setup"

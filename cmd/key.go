@@ -15,6 +15,7 @@ import (
 )
 
 func configureRecoveryKey(cmd *cobra.Command, path string) error {
+	output := newSetupOutput(cmd.OutOrStdout())
 	settings, err := config.LoadDiagnostic(path)
 	if err != nil {
 		return err
@@ -38,7 +39,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 			return err
 		}
 
-		fmt.Fprintln(cmd.OutOrStdout(), "Existing acknowledged recovery key preserved; it will not be displayed again.")
+		output.status("OK", "Existing acknowledged recovery key preserved; it will not be displayed again.")
 
 		return nil
 	}
@@ -47,6 +48,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		return errors.New("recovery-key setup requires an interactive terminal with unredirected stdout; do not record the terminal or run under a service/log collector")
 	}
 
+	output.status("WARN", "Disable terminal recording/transcripts. The key is shown only once; save it outside this machine.")
 	input := bufio.NewReader(os.Stdin)
 	err = setupRecoveryKey(cmd.Context(), path, func(recovery string) error {
 		// The only secret output bypasses command/log writers and goes directly
@@ -55,7 +57,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		return err
 	}, func(existing bool, k key.Key) error {
 		if existing {
-			fmt.Fprintln(cmd.OutOrStdout(), "Existing recovery key preserved; it will not be displayed. Use your saved copy, or copy the protected key file locally to safe offline storage before continuing.")
+			output.status("WARN", "Existing recovery key preserved; it will not be displayed. Use your saved copy, or copy the protected key file locally to safe offline storage before continuing.")
 		}
 		fmt.Fprint(cmd.OutOrStdout(), "Paste your saved recovery key (hidden): ")
 		entered, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -78,7 +80,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		return nil
 	})
 	if err == nil {
-		fmt.Fprintln(cmd.OutOrStdout(), "Recovery key acknowledged and saved privately. No backup has been executed.")
+		output.status("OK", "Recovery key acknowledged and saved privately. No backup was executed by this step.")
 	}
 
 	return err

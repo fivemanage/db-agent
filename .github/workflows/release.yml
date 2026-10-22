@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
+    env:
+      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      RELEASE_API_URL: ${{ vars.DB_AGENT_API_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Validate public release and source
+        id: version
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          if [[ "$REPOSITORY_VISIBILITY" != public ]]; then
+            echo 'Public downloads/provenance require a public repository; no release will be published.' >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          go run ./tools/release-manifest validate --version "$version" --public-key "$RELEASE_PUBLIC_KEY" --api-url "$RELEASE_API_URL"
+          commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$commit" origin/master
+          printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
+      - name: Build and compare independent output directories
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          bash scripts/build-release.sh "$RELEASE_VERSION" "$RELEASE_PUBLIC_KEY" "$RELEASE_API_URL" dist
+          bash scripts/build-release.sh "$RELEASE_VERSION" "$RELEASE_PUBLIC_KEY" "$RELEASE_API_URL" "$RUNNER_TEMP/rebuild"
+          diff --recursive dist "$RUNNER_TEMP/rebuild"
+      - name: SPDX SBOM from the four executables only
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: dist
+          format: spdx-json
+          syft-version: v1.55.0
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - run: mv sbom.spdx.json dist/sbom.spdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    timeout-minutes: 10
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      RELEASE_API_URL: ${{ vars.DB_AGENT_API_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-release
+          path: dist
+      - name: Build signing tool before exposing the key
+        run: go build -o "$RUNNER_TEMP/release-manifest" ./tools/release-manifest
+      - name: Sign manifests and complete checksum inventory
+        env:
+          SIGNING_KEY: ${{ secrets.DB_AGENT_RELEASE_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/db-agent-signing.XXXXXX")"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          unset SIGNING_KEY
+          "$RUNNER_TEMP/release-manifest" seal --dir dist --private "$key" \
+            --version "$RELEASE_VERSION" --public-key "$RELEASE_PUBLIC_KEY" \
+            --api-url "$RELEASE_API_URL" --commit "$RELEASE_COMMIT" \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    needs: [build, sign]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      DB_AGENT_RELEASE_DIR: dist
+      DB_AGENT_RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      DB_AGENT_RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      DB_AGENT_RELEASE_SERVICE_SMOKE: '1'
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release
+          path: dist
+      - name: Verify signed inventory
+        shell: bash
+        run: |
+          go run ./tools/release-manifest verify-release --dir dist --public-key "$DB_AGENT_RELEASE_PUBLIC_KEY"
+          if [[ "$RUNNER_OS" != Windows ]]; then
+            chmod +x dist/db-agent-*
+          fi
+      - name: Compile native smoke harness
+        shell: bash
+        run: go test -c -tags release_smoke -o release-smoke.test.exe ./test/releaseproof
+      - name: Native executable, service install, signed staging, update and uninstall
+        shell: bash
+        run: |
+          export DB_AGENT_RELEASE_DIR="$GITHUB_WORKSPACE/dist"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo --preserve-env=PATH,HOME,CGO_ENABLED,DB_AGENT_RELEASE_DIR,DB_AGENT_RELEASE_VERSION,DB_AGENT_RELEASE_PUBLIC_KEY,DB_AGENT_RELEASE_SERVICE_SMOKE \
+              ./release-smoke.test.exe -test.v -test.timeout=5m
+          else
+            ./release-smoke.test.exe -test.v -test.timeout=5m
+          fi
+
+  publish:
+    needs: [build, sign, smoke]
+    runs-on: ubuntu-24.04
+    environment: release-promotion
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release
+          path: dist
+      - name: Verify candidate before provenance
+        run: go run ./tools/release-manifest verify-release --dir dist --public-key "$RELEASE_PUBLIC_KEY"
+      - name: Attest binaries, manifests, SBOM, and signed checksum inventory
+        id: provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*
+      - name: Upload draft, verify downloads, then promote
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        shell: bash
+        run: |
+          cp "$PROVENANCE_BUNDLE" dist/provenance.sigstore.json
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/downloaded"
+          diff --recursive dist "$RUNNER_TEMP/downloaded"
+          go run ./tools/release-manifest verify-release --dir "$RUNNER_TEMP/downloaded" --public-key "$RELEASE_PUBLIC_KEY"
+          for artifact in "$RUNNER_TEMP/downloaded"/db-agent-*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded/provenance.sigstore.json"
+          done
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

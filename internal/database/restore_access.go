@@ -22,9 +22,13 @@ const restorePrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, C
 // The dedicated account may provision destination-only principals; backup SQL
 // must never run through its broader account-management connection.
 func RestoreAccessSQL() []string {
-	account := "'db_agent_restore'@'<exact local client host>'"
+	return restoreAccountSQL("<exact local client host>", "<private restore password>")
+}
+
+func restoreAccountSQL(clientHost, password string) []string {
+	account := "'db_agent_restore'@'" + clientHost + "'"
 	return []string{
-		"CREATE USER " + account + " IDENTIFIED BY '<private restore password>'",
+		"CREATE USER " + account + " IDENTIFIED BY '" + password + "'",
 		"GRANT CREATE USER ON *.* TO " + account,
 		"GRANT " + restorePrivileges + " ON " + restoreGrantScope + " TO " + account + " WITH GRANT OPTION",
 	}

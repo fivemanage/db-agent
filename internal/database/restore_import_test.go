@@ -64,6 +64,20 @@ func TestRestoreAccountLockPolicyIsCheckedBeforeWrites(t *testing.T) {
 	}
 }
 
+func TestMySQLChecksRequireAnEnforcingServerVersion(t *testing.T) {
+	for _, test := range []struct {
+		version string
+		allowed bool
+	}{
+		{"5.7.44", false}, {"8.0.15", false}, {"8.0.16", true},
+		{"8.4.11", true}, {"9.0.0", true}, {"11.4.13-MariaDB", false},
+	} {
+		if got := supportsMySQLChecks(test.version); got != test.allowed {
+			t.Fatalf("unexpected CHECK enforcement policy for %s", test.version)
+		}
+	}
+}
+
 func TestRestoreDiagnosticsReadWarningCodesWithoutExposingSQL(t *testing.T) {
 	for _, code := range []uint16{0, 1265, 1681} {
 		db, mock, err := sqlmock.New()

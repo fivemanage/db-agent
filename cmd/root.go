@@ -18,5 +18,10 @@ func Execute() error {
 }
 
 func init() {
+	help := rootCmd.HelpFunc()
+	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		newSetupOutput(cmd.OutOrStdout()).banner()
+		help(cmd, args)
+	})
 	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "config file path (default: platform path or DB_AGENT_CONFIG)")
 }

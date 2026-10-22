@@ -27,8 +27,9 @@ make check      # Go tests and vet
 ```
 
 Builds default to version `dev`; override it with `make build VERSION=0.1.0`.
-These are unsigned development builds. Use `scripts/build-release.sh` for signed
-release artifacts and manifests. `go run . <command>` compiles the current source
+These are unsigned development builds. See [RELEASE.md](RELEASE.md) for tagged
+release CI, secret-free builds, signing, provenance, and verification.
+`go run . <command>` compiles the current source
 automatically, so it does not require a separate build.
 
 ## Register and connect
@@ -54,6 +55,14 @@ new agents use `/api/v1/...` without redirects.
 it resumes without another one-time token and preserves existing database
 settings and key material. Use `db-agent configure --config ./config.yaml` to
 retry failed database setup or explicitly change an existing connection.
+
+Setup displays five numbered stages: enrollment, database connection, recovery
+key, prerequisite checks, and service startup. Install, configure, and help share
+a compact ASCII "DATABASE AGENT" header. Connection details are grouped for
+review without showing passwords. Status labels use color on supported terminals
+and stay plain text when redirected; set `NO_COLOR=1` or `TERM=dumb` to disable
+color. The wizard does not clear or redraw the terminal, and a completed setup
+does not claim that the first backup has finished.
 
 The wizard offers a hidden paste of the game server's connection-string value,
 or manual host/port/username/password/database input. Supported paste forms:
@@ -94,6 +103,25 @@ the displayed schema/routine grants. Root and accounts with detected admin or
 grant-authority privileges cannot be saved by the wizard. Admin credentials are
 ephemeral; only a tested, confirmed backup account is persisted. The wizard
 offers a retry after failed steps; enrollment does not need to be repeated.
+
+During the database step, `install` asks **Enable dashboard restores? [y/N]**.
+Skipping keeps setup backup-only. Opting in shows the separate `db_agent_restore`
+account's SQL and sensitive global account-management permission, and requires
+typing `AUTHORIZE` before creation. Setup reuses the temporary admin connection
+when available; otherwise it asks once for a local administrator's username and
+hidden password, pinned to the saved database server. Admin credentials are never
+saved. Only the exact server-observed client host is granted access, with data
+permissions confined to the escaped `fm_restore_` namespace. The account is
+verified before separate restore credentials are saved locally; the backup account
+stays read-only. No restore or production cutover runs during setup.
+
+Rerun `install` to enable restores on an existing installation. Already-enabled
+access is rechecked and preserved without recreating accounts. A previously
+disabled saved account can be re-enabled after verification and `AUTHORIZE`.
+Creation never changes an existing SQL account; use `configure --restore-access`
+to authorize one instead. Grant, verification, or save failure removes only the
+restore account confirmed created by that attempt and preserves backup setup/key
+material. Ambiguous creation or failed cleanup requires local inspection.
 
 Changes replace the config privately while retaining other settings. Database
 credentials stay on the local machine and are never included in the API probe.
@@ -319,11 +347,32 @@ needs release qualification, not just successful SQL recovery tests; see
 [RESTORE-JOBS.md](RESTORE-JOBS.md) and
 [RESTORE-QUALIFICATION.md](RESTORE-QUALIFICATION.md).
 
-Optional local authorization setup is available with
+Supported tables preserve enforced `CHECK (JSON_VALID(column))` constraints and
+ordinary FULLTEXT indexes over local text columns. Other CHECK expressions and
+FULLTEXT parser plugins remain unsupported. MariaDB CHECK enforcement is enabled
+for the import session; MySQL dumps containing these checks require MySQL 8.0.16+
+so constraints cannot be silently ignored by an older server.
+
+MariaDB dump-client AUTOCOMMIT save/disable, COMMIT, and restore blocks are
+recognized as bookkeeping and never replayed. Import keeps autocommit enabled;
+incomplete/nested blocks and other transaction-control SQL remain unsupported.
+
+Dashboard restores accept up to **8 GiB of uncompressed SQL** and **8 GiB of
+encrypted input**. Preflight validates the entire dump before database writes,
+then imports using hashed references to the private SQL file rather than holding
+all row SQL in RAM. Statements (4 MiB), raw frames including comments (8 MiB),
+statement count (1,000,000), and table/view objects (4096) remain bounded. The
+two-hour job deadline and 256 MiB free-disk reserve still apply. This does not
+raise the separate current 1 GiB encrypted backup-upload staging limit.
+
+Installation offers to create and authorize the separate restore account as
+described above. For an existing administrator-prepared account, local setup is available with
 `db-agent configure --restore-access --config ./config.yaml`. It verifies an
 **existing dedicated provisioning account** and saves separate credentials only
 after explicit confirmation; it does not create users, change grants, run an
 import, or contact the dashboard. The running agent advertises readiness separately.
+Enter `?` at the username prompt for the administrator's account-creation SQL
+and exact-host instructions. Do not enter `root` or your game-server/backup login.
 This authority includes global
 SQL account-management permission and must never execute backup SQL directly.
 See [RESTORE-ISOLATION.md](RESTORE-ISOLATION.md#explicit-local-restore-access)

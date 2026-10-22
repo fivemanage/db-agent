@@ -34,6 +34,7 @@ var testCmd = &cobra.Command{
 }
 
 func printChecks(output io.Writer, checks []database.Check) bool {
+	view := newSetupOutput(output)
 	passed := true
 	for _, check := range checks {
 		status := "PASS"
@@ -45,7 +46,7 @@ func printChecks(output io.Writer, checks []database.Check) bool {
 			status = "SKIP"
 		}
 
-		fmt.Fprintf(output, "[%s] %s: %s\n", status, check.Name, check.Message)
+		fmt.Fprintf(output, "%s %s: %s\n", view.badge(status), check.Name, check.Message)
 	}
 
 	return passed

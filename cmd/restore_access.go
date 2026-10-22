@@ -33,17 +33,19 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "Restore access is optional and separate from the read-only backup account. No backup grants, keys, users, or databases are changed by this command.")
-	fmt.Fprintln(output, "Supply an existing dedicated local provisioning account, not root or a game-server/backup account. A local administrator must grant only this template's permissions for the exact server-observed client host:")
-	for _, statement := range database.RestoreAccessSQL() {
-		fmt.Fprintf(output, "%s;\n", statement)
-	}
-	fmt.Fprintln(output, "CREATE USER is global SQL account-management authority, not a destination-only privilege. Use a dedicated account and protect it accordingly. These credentials must never execute backup SQL; actual imports require a separate destination-confined principal. Credentials stay in the private local config and are never sent to FiveManage.")
-	user, err := prompt(input, output, "Dedicated restore provisioning username", "")
+	view := newSetupOutput(output)
+	fmt.Fprintln(output, "\nRestores go into a new, separate database, not your live game database.")
+	fmt.Fprintln(output, "This optional setup only checks and saves a restore account on this machine.")
+	fmt.Fprintln(output, "It does not change SQL users, databases, backup access, or your recovery key.")
+	view.step(1, 3, "Restore account", "Use a database account created only for restores.")
+	fmt.Fprintln(output, "  Not root, your game-server login, or your read-only backup login.")
+	fmt.Fprintln(output, "  Need an account? Enter ? for instructions for your database administrator.")
+	user, err := promptRestoreUser(ctx, input, output, backup.User)
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(output, "Restore provisioning password (hidden): ")
+	fmt.Fprintln(output, "  The password stays in your private local config, never sent to FiveManage.")
+	fmt.Fprint(output, "Restore account password (hidden): ")
 	password, err := readSecret()
 	fmt.Fprintln(output)
 	if err != nil {
@@ -53,7 +55,8 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := access.ValidateFor(backup); err != nil {
 		return err
 	}
-	test, err := prompt(input, output, "Verify this separate account with read-only connection/grant checks? [y/N]", "N")
+	view.step(2, 3, "Check access", "Test the connection and permissions without changing the database.")
+	test, err := prompt(input, output, "Check this account now? (y/N)", "")
 	if err != nil {
 		return err
 	}
@@ -63,6 +66,7 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	view.status("INFO", "Checking restore account...")
 	if err := check(ctx, backup, access); err != nil {
 		switch {
 		case errors.Is(err, context.Canceled):
@@ -79,7 +83,14 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 			return errors.New("cannot verify local restore provisioning access; no authorization was saved")
 		}
 	}
-	confirm, err := prompt(input, output, "Type AUTHORIZE to save these separate credentials locally for future restore provisioning", "")
+	view.status("OK", "Connection and restore permissions verified.")
+	view.step(3, 3, "Authorize future restores", "Review what this account allows before saving.")
+	fmt.Fprintln(output, "  - Can create and manage SQL users server-wide (CREATE USER).")
+	fmt.Fprintln(output, "    This is a powerful permission. Keep this account private.")
+	fmt.Fprintln(output, "  - Can create databases and grant access within fm_restore_ only.")
+	fmt.Fprintln(output, "  - Restored SQL uses a different account limited to its new database.")
+	fmt.Fprintln(output, "\nNothing is saved unless you authorize it. No restore will run now.")
+	confirm, err := prompt(input, output, "Type AUTHORIZE to save restore access", "")
 	if err != nil {
 		return err
 	}
@@ -92,6 +103,49 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := save(access); err != nil {
 		return errors.New("cannot finish saving private restore authorization; inspect the local config before retrying; no restore was run")
 	}
-	fmt.Fprintln(output, "Separate restore provisioning access saved privately. Backup credentials and the recovery key are unchanged. No restore was run; dashboard import is not enabled by this setup command.")
+	view.status("OK", "Restore access saved on this machine.")
+	fmt.Fprintln(output, "  Backup access and your recovery key are unchanged. No restore was run.")
 	return nil
+}
+
+func promptRestoreUser(ctx context.Context, input *bufio.Reader, output io.Writer, backupUser string) (string, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		user, err := prompt(input, output, "Restore account username (or ? for help)", "")
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case user == "?":
+			printRestoreAccountHelp(output)
+		case user == "":
+			newSetupOutput(output).status("WARN", "Enter the restore account username, or ? for setup instructions.")
+		case strings.EqualFold(user, "root"):
+			newSetupOutput(output).status("WARN", "Do not use root here. Enter a separate account created only for restores.")
+		case strings.EqualFold(user, backupUser):
+			newSetupOutput(output).status("WARN", "That is your backup account. Keep it read-only and use a separate restore account.")
+		default:
+			return user, nil
+		}
+	}
+}
+
+func printRestoreAccountHelp(output io.Writer) {
+	newSetupOutput(output).section("Create a dedicated restore account (administrator task)")
+	fmt.Fprintln(output, "  Ask your database administrator to run the SQL below, then return here.")
+	fmt.Fprintln(output, "  If the dedicated account already exists, verify its grants; do not recreate it.")
+	fmt.Fprintln(output, "\n  Replace the placeholders first:")
+	fmt.Fprintln(output, "  - <private restore password>: a new, strong password used only here.")
+	fmt.Fprintln(output, "  - <exact local client host>: the host MySQL/MariaDB sees for this agent.")
+	fmt.Fprintln(output, "    Check USER() from a connection using the agent's local TCP address.")
+	fmt.Fprintln(output, "    Docker may report a bridge IP. Never use % or a subnet as the host.")
+	fmt.Fprintln(output, "\n  Grant only these permissions, with no roles or production database access.")
+	fmt.Fprintln(output, "  CREATE USER allows SQL user management server-wide. Protect this account.")
+	wrap := strings.NewReplacer(" IDENTIFIED BY ", "\n      IDENTIFIED BY ", " ON ", "\n      ON ", " TO ", "\n      TO ", ", REFERENCES", ",\n      REFERENCES")
+	for _, statement := range database.RestoreAccessSQL() {
+		fmt.Fprintf(output, "\n    %s;\n", wrap.Replace(statement))
+	}
+	fmt.Fprintln(output, "\n  Once the account is ready, enter its username below (db_agent_restore).")
 }

@@ -4,9 +4,11 @@ package restoreplan
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -25,10 +27,10 @@ var (
 )
 
 const (
-	DefaultMaxInputBytes     = 64 << 20
+	DefaultMaxInputBytes     = int64(8 << 30)
 	DefaultMaxStatementBytes = 4 << 20
 	DefaultMaxTables         = 4096
-	DefaultMaxStatements     = 100000
+	DefaultMaxStatements     = 1000000
 )
 
 const SessionModeSQL = "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION'"
@@ -59,18 +61,30 @@ type View struct {
 }
 
 type Plan struct {
-	statements  []string
+	statements  []plannedStatement
 	tables      []Table
 	views       []View
 	bytes       int64
 	maxBytes    int64
 	destination string
+	input       io.ReaderAt
+	options     Options
+	jsonChecks  bool
+}
+
+type plannedStatement struct {
+	sql    string
+	offset int64
+	size   int
+	digest [32]byte
 }
 
 func (p *Plan) String() string   { return "private restore plan" }
 func (p *Plan) GoString() string { return p.String() }
 
 func (p *Plan) Tables() []Table { return append([]Table(nil), p.tables...) }
+
+func (p *Plan) HasJSONChecks() bool { return p.jsonChecks }
 
 func (p *Plan) Destination() string {
 	if p == nil {
@@ -93,7 +107,7 @@ func (p *Plan) add(statements ...string) error {
 		if p.bytes > p.maxBytes {
 			return ErrLimit
 		}
-		p.statements = append(p.statements, statement)
+		p.statements = append(p.statements, plannedStatement{sql: statement})
 	}
 	return nil
 }
@@ -105,11 +119,41 @@ func (p *Plan) ForEach(ctx context.Context, consume func(string) error) error {
 	if p == nil || len(p.statements) == 0 || consume == nil {
 		return ErrOutput
 	}
+	parser, err := sqlparser.New(sqlparser.Options{})
+	if err != nil {
+		return ErrOutput
+	}
 	for _, statement := range p.statements {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := consume(statement); err != nil {
+		sql := statement.sql
+		if statement.size != 0 {
+			data := make([]byte, statement.size)
+			if _, err := p.input.ReadAt(data, statement.offset); err != nil || sha256.Sum256(data) != statement.digest {
+				return ErrInput
+			}
+			parts, err := split(ctx, string(data), p.options)
+			if err != nil || len(parts) != 1 {
+				return ErrInput
+			}
+			node, err := parser.ParseStrictDDL(parts[0])
+			if err != nil {
+				return ErrInput
+			}
+			insert, ok := node.(*sqlparser.Insert)
+			if !ok || !plainTable(insert.Table) {
+				return ErrInput
+			}
+			name := insert.Table.Expr.(sqlparser.TableName)
+			name.Qualifier = sqlparser.NewIdentifierCS(p.destination)
+			insert.Table.Expr = name
+			sql = sqlparser.String(insert)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := consume(sql); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -120,55 +164,85 @@ func (p *Plan) ForEach(ctx context.Context, consume func(string) error) error {
 }
 
 type builder struct {
-	options       Options
-	database      *sqlparser.CreateDatabase
-	used          bool
-	tables        map[string]*tablePlan
-	dropped       map[string]bool
-	bytes         int64
-	views         map[string]*viewPlan
-	stubs         map[string]*viewStub
-	viewDrops     map[string]bool
-	viewCollation string
+	options             Options
+	database            *sqlparser.CreateDatabase
+	used                bool
+	tables              map[string]*tablePlan
+	dropped             map[string]bool
+	bytes               int64
+	views               map[string]*viewPlan
+	stubs               map[string]*viewStub
+	viewDrops           map[string]bool
+	viewCollation       string
+	jsonChecks          bool
+	input               io.ReaderAt
+	current             plannedStatement
+	autocommitBlock     bool
+	autocommitCommitted bool
 }
 
 type tablePlan struct {
 	create  *sqlparser.CreateTable
-	data    []string
+	data    []plannedStatement
 	rows    int64
 	parents map[string]bool
 }
 
 func Prepare(ctx context.Context, input io.Reader, options Options) (*Plan, error) {
-	if err := options.defaults(); err != nil || input == nil {
+	return prepare(ctx, input, nil, options)
+}
+
+// PrepareFile retains bounded, hashed references to row statements instead of
+// keeping their SQL in memory. The authenticated private file must remain open
+// and unchanged until the returned plan has been consumed.
+func PrepareFile(ctx context.Context, input *os.File, options Options) (*Plan, error) {
+	if input == nil {
 		return nil, ErrOptions
 	}
-	data, err := readInput(ctx, input, options.MaxInputBytes)
-	if err != nil {
-		return nil, err
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return nil, ErrInput
 	}
-	statements, err := split(ctx, string(data), options)
-	if err != nil {
-		return nil, fmt.Errorf("SQL framing rejected: %w", err)
+	return prepare(ctx, input, input, options)
+}
+
+func prepare(ctx context.Context, input io.Reader, backing io.ReaderAt, options Options) (*Plan, error) {
+	if err := options.defaults(); err != nil || input == nil {
+		return nil, ErrOptions
 	}
 	parser, err := sqlparser.New(sqlparser.Options{})
 	if err != nil {
 		return nil, ErrUnsupported
 	}
-	b := &builder{options: options, tables: make(map[string]*tablePlan), dropped: make(map[string]bool),
+	b := &builder{options: options, input: backing, tables: make(map[string]*tablePlan), dropped: make(map[string]bool),
 		views: make(map[string]*viewPlan), stubs: make(map[string]*viewStub), viewDrops: make(map[string]bool)}
-	for i, statement := range statements {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		node, err := parser.ParseStrictDDL(statement)
+	ordinal := 0
+	err = scanStatements(ctx, input, options, func(raw string, offset int64) error {
+		statements, err := split(ctx, raw, options)
 		if err != nil {
-			// Parser diagnostics contain raw SQL, including customer data.
-			return nil, fmt.Errorf("SQL statement %d cannot be parsed completely: %w", i+1, ErrUnsupported)
+			return fmt.Errorf("SQL framing rejected: %w", err)
 		}
-		if err := b.accept(node); err != nil {
-			return nil, fmt.Errorf("SQL statement %d (%T) rejected: %w", i+1, node, err)
+		for _, statement := range statements {
+			ordinal++
+			if ordinal > options.MaxStatements {
+				return ErrLimit
+			}
+			node, err := parser.ParseStrictDDL(statement)
+			if err != nil {
+				// Parser diagnostics contain raw SQL, including customer data.
+				return fmt.Errorf("SQL statement %d cannot be parsed completely: %w", ordinal, ErrUnsupported)
+			}
+			b.current = plannedStatement{offset: offset, size: len(raw)}
+			if backing != nil {
+				b.current.digest = sha256.Sum256([]byte(raw))
+			}
+			if err := b.accept(node); err != nil {
+				return fmt.Errorf("SQL statement %d (%T) rejected: %w", ordinal, node, err)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -201,41 +275,11 @@ func (o *Options) defaults() error {
 	if o.MaxStatements == 0 {
 		o.MaxStatements = DefaultMaxStatements
 	}
-	if o.MaxInputBytes < 1 || o.MaxInputBytes > 1<<30 || o.MaxStatementBytes < 1 || o.MaxStatementBytes > 64<<20 ||
+	if o.MaxInputBytes < 1 || o.MaxInputBytes > DefaultMaxInputBytes || o.MaxStatementBytes < 1 || o.MaxStatementBytes > 64<<20 ||
 		o.MaxTables < 1 || o.MaxTables > 10000 || o.MaxStatements < 1 || o.MaxStatements > 1000000 {
 		return ErrOptions
 	}
 	return nil
-}
-
-func readInput(ctx context.Context, input io.Reader, limit int64) ([]byte, error) {
-	var result []byte
-	buffer := make([]byte, 32<<10)
-	empty := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		n, err := input.Read(buffer[:min(int64(len(buffer)), limit-int64(len(result))+1)])
-		if int64(len(result))+int64(n) > limit {
-			return nil, ErrLimit
-		}
-		result = append(result, buffer[:n]...)
-		if err == io.EOF {
-			return result, nil
-		}
-		if err != nil {
-			return nil, &safeError{ErrInput, err}
-		}
-		if n == 0 {
-			empty++
-			if empty > 100 {
-				return nil, &safeError{ErrInput, io.ErrNoProgress}
-			}
-		} else {
-			empty = 0
-		}
-	}
 }
 
 func identifier(name string) bool {
@@ -313,6 +357,14 @@ func (b *builder) accept(node sqlparser.Statement) error {
 		return b.insert(node)
 	case *sqlparser.Set:
 		return b.bookkeeping(node)
+	case *sqlparser.Commit:
+		// MariaDB's per-table dump wrapper is discarded as a complete unit;
+		// the executor pins autocommit on and never replays transaction state.
+		if !b.autocommitBlock || b.autocommitCommitted {
+			return ErrUnsupported
+		}
+		b.autocommitCommitted = true
+		return nil
 	case *sqlparser.DropTable:
 		return b.dropTable(node)
 	case *sqlparser.AlterTable:
@@ -344,7 +396,7 @@ func (b *builder) accept(node sqlparser.Statement) error {
 }
 
 func (b *builder) finish() (*Plan, error) {
-	if b.database == nil || !b.used || len(b.tables) == 0 || len(b.stubs) != 0 {
+	if b.database == nil || !b.used || len(b.tables) == 0 || len(b.stubs) != 0 || b.autocommitBlock {
 		return nil, ErrUnsupported
 	}
 	for name := range b.dropped {
@@ -359,7 +411,11 @@ func (b *builder) finish() (*Plan, error) {
 	}
 	for _, table := range b.tables {
 		for _, constraint := range table.create.TableSpec.Constraints {
-			reference := constraint.Details.(*sqlparser.ForeignKeyDefinition).ReferenceDefinition
+			fk, ok := constraint.Details.(*sqlparser.ForeignKeyDefinition)
+			if !ok {
+				continue
+			}
+			reference := fk.ReferenceDefinition
 			parent := b.tables[strings.ToLower(reference.ReferencedTable.Name.String())]
 			if parent == nil || parent.create.Table.Name.String() != reference.ReferencedTable.Name.String() {
 				return nil, ErrUnsupported
@@ -410,13 +466,20 @@ func (b *builder) finish() (*Plan, error) {
 			return nil, err
 		}
 	}
-	plan := &Plan{maxBytes: b.options.MaxInputBytes * 2, destination: b.options.Destination}
+	plan := &Plan{maxBytes: b.options.MaxInputBytes * 2, destination: b.options.Destination, input: b.input, options: b.options, jsonChecks: b.jsonChecks}
 	if err := plan.add(
 		SessionModeSQL,
 		"SET NAMES utf8mb4", "SET SESSION time_zone = '+00:00'",
 		"SET SESSION foreign_key_checks = 1", "SET SESSION unique_checks = 1", sqlparser.String(b.database),
 	); err != nil {
 		return nil, err
+	}
+	if b.jsonChecks && b.options.Driver == "mariadb" {
+		// MariaDB can inherit disabled CHECK enforcement from the server; don't
+		// let a valid constraint silently stop protecting the imported data.
+		if err := plan.add("SET SESSION check_constraint_checks = 1"); err != nil {
+			return nil, err
+		}
 	}
 	for _, name := range ordered {
 		table := b.tables[name]
@@ -426,9 +489,21 @@ func (b *builder) finish() (*Plan, error) {
 		plan.tables = append(plan.tables, Table{Name: table.create.Table.Name.String(), Rows: table.rows})
 	}
 	for _, name := range ordered {
-		if err := plan.add(b.tables[name].data...); err != nil {
-			return nil, err
+		for _, statement := range b.tables[name].data {
+			if statement.size == 0 {
+				if err := plan.add(statement.sql); err != nil {
+					return nil, err
+				}
+			} else {
+				plan.statements = append(plan.statements, statement)
+			}
 		}
+	}
+	if b.input != nil {
+		plan.bytes += b.bytes
+	}
+	if plan.bytes > plan.maxBytes {
+		return nil, ErrLimit
 	}
 	if err := b.finishViews(plan); err != nil {
 		return nil, err

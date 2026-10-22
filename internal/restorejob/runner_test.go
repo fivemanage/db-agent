@@ -117,7 +117,15 @@ func TestRunnerJoinsRecoveryPlanJournalAndTerminalReplay(t *testing.T) {
 	imports := 0
 	f.runner.importPlan = func(ctx context.Context, backup config.DatabaseConfig, access config.RestoreConfig, plan *restoreplan.Plan, timeout time.Duration, start, validate func(context.Context) error) error {
 		imports++
-		assertNoWorkspace(t, f.runner)
+		paths, err := filepath.Glob(filepath.Join(f.runner.journal.dir, ".restore-work-*", "verified.sql"))
+		if err != nil || len(paths) != 1 {
+			t.Fatal("file-backed plan lost its authenticated SQL workspace before import")
+		}
+		file, err := securefile.Open(paths[0], restoreplan.DefaultMaxInputBytes)
+		if err != nil {
+			t.Fatal("SQL workspace is not private during import")
+		}
+		file.Close()
 		if plan.Destination() != f.job.Destination() || len(plan.Tables()) != 1 || plan.Tables()[0].Rows != 1 || backup.User == access.User {
 			t.Fatal("runner lost scope/data validation or reused the backup account")
 		}
@@ -160,6 +168,26 @@ func TestRunnerJoinsRecoveryPlanJournalAndTerminalReplay(t *testing.T) {
 	replay, err := f.runner.Run(context.Background(), f.job)
 	if err != nil || replay != state || imports != 1 || f.gets.Load() != 1 || f.lookup.calls.Load() != 1 {
 		t.Fatal("terminal redelivery accessed config/network or repeated an import")
+	}
+}
+
+func TestRunnerMultiGiBLimits(t *testing.T) {
+	job := testJob()
+	for _, limit := range []int64{0, 4 << 30, restoreplan.DefaultMaxInputBytes} {
+		runner, err := NewRunner(filepath.Join(t.TempDir(), "config.yaml"), job.Binding, &runnerLookup{}, Options{MaxSQLBytes: limit})
+		if err != nil {
+			t.Fatalf("multi-GiB limit rejected: %v", err)
+		}
+		want := limit
+		if want == 0 {
+			want = 8 << 30
+		}
+		if runner.options.MaxSQLBytes != want || runner.options.Download.MaxOutputBytes != want || runner.options.Download.MaxInputBytes != 8<<30 {
+			t.Fatal("download, decompression, and preflight limits disagree")
+		}
+	}
+	if _, err := NewRunner(filepath.Join(t.TempDir(), "config.yaml"), job.Binding, &runnerLookup{}, Options{MaxSQLBytes: restoreplan.DefaultMaxInputBytes + 1}); !errors.Is(err, ErrInvalid) {
+		t.Fatal("runner accepted an unbounded SQL budget")
 	}
 }
 

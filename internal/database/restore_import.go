@@ -23,7 +23,7 @@ var (
 	ErrRestoreImport     = errors.New("isolated restore import failed; the partial destination is retained for inspection, never automatically retried or dropped")
 	ErrRestoreValidation = errors.New("isolated restore validation failed; the destination was not declared successful")
 	ErrRestoreUncertain  = errors.New("cannot confirm restore SQL has stopped or its import account is locked; inspect the isolated destination and local server before cutover")
-	ErrRestorePolicy     = errors.New("local SQL server cannot enforce the supported restore-account locking policy; no import was started")
+	ErrRestorePolicy     = errors.New("local SQL server cannot enforce the required restore safety policy; no import was started")
 )
 
 const DefaultRestoreStatementTimeout = 5 * time.Minute
@@ -90,7 +90,7 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 	if exists != 0 {
 		return ErrRestoreExists
 	}
-	if !supportsRestoreLock(settings.Driver, version) {
+	if !supportsRestoreLock(settings.Driver, version) || plan.HasJSONChecks() && settings.Driver == "mysql" && !supportsMySQLChecks(version) {
 		return ErrRestorePolicy
 	}
 	digest := sha256.Sum256([]byte(plan.Destination()))
@@ -168,6 +168,18 @@ func supportsRestoreLock(driver, version string) bool {
 		return major > 5 || major == 5 && minor == 7 && patch >= 6
 	}
 	return major > 10 || major == 10 && (minor > 4 || minor == 4 && patch >= 2)
+}
+
+func supportsMySQLChecks(version string) bool {
+	driver, numeric := serverVersion(version)
+	major, minor := versionNumbers(numeric)
+	parts := strings.Split(numeric, ".")
+	patch := 0
+	if len(parts) > 2 {
+		patch, _ = strconv.Atoi(parts[2])
+	}
+	// Earlier MySQL releases accept CHECK syntax but don't enforce it.
+	return driver == "mysql" && (major > 8 || major == 8 && (minor > 0 || patch >= 16))
 }
 
 func importAsChild(ctx context.Context, settings config.DatabaseConfig, plan *restoreplan.Plan, statementTimeout time.Duration, beforeValidation func(context.Context) error) (err error) {

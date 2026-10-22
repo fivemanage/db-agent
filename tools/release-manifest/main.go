@@ -28,10 +28,12 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: release-manifest keygen|public-key|sign [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release [flags]")
 	}
 
 	switch args[0] {
+	case "validate", "seal", "verify-release":
+		return runRelease(args)
 	case "keygen":
 		flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
 		privatePath := flags.String("private", "", "path for a new private key")
@@ -133,7 +135,7 @@ func run(args []string) error {
 
 		return outputFile.Close()
 	default:
-		return errors.New("usage: release-manifest keygen|public-key|sign [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release [flags]")
 	}
 }
 
@@ -146,6 +148,9 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 	private, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
 	if err != nil || len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("private key must be base64-encoded Ed25519")
+	}
+	if !ed25519.PrivateKey(private).Equal(ed25519.NewKeyFromSeed(private[:ed25519.SeedSize])) {
+		return nil, errors.New("private key has an inconsistent public key")
 	}
 
 	return ed25519.PrivateKey(private), nil

@@ -1,0 +1,68 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Formatting, vet, and workflow/shell lint
+        shell: bash
+        run: |
+          test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          go vet ./...
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          shellcheck --severity=warning scripts/*.sh
+      - name: Race tests
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=1 -timeout=10m ./...
+
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Native tests with injected version
+        env:
+          CGO_ENABLED: '0'
+        run: go test -count=1 -timeout=10m -ldflags "-X github.com/fivemanage/db-agent/cmd.version=1.2.3" ./...
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Disposable MySQL and MariaDB backup/restore integration
+        run: bash scripts/test-restore-proof.sh

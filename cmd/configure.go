@@ -29,6 +29,7 @@ var configureCmd = &cobra.Command{
 			return err
 		}
 		if configureRestoreAccess {
+			newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Restore access setup", "Use an existing restore account for dashboard restores.")
 			return configureLocalRestoreAccess(cmd, settings)
 		}
 
@@ -37,32 +38,47 @@ var configureCmd = &cobra.Command{
 		}
 
 		if configureKeyOnly {
+			newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Recovery key setup", "Preserve the original key and confirm a recovery copy stored outside this machine.")
 			return configureRecoveryKey(cmd, config.ResolvePath(configPath))
 		}
 
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return errors.New("configure requires an interactive terminal for hidden password input; alternatively edit database settings in the private config file")
-		}
-
-		return configureDatabase(cmd.Context(), bufio.NewReader(cmd.InOrStdin()), cmd.OutOrStdout(), settings.Database, func() (string, error) {
-			password, err := term.ReadPassword(int(os.Stdin.Fd()))
-			return string(password), err
-		}, databaseSetup{
-			inspect:   database.Inspect,
-			provision: database.ProvisionBackupAccount,
-			save:      func(candidate config.DatabaseConfig) error { return config.SaveDatabase(configPath, candidate) },
-		})
+		newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Database connection setup", "Connection details -> Connection checks -> Backup account")
+		return configureLocalDatabase(cmd, settings.Database, false)
 	},
+}
+
+func configureLocalDatabase(cmd *cobra.Command, previous config.DatabaseConfig, dashboardRestores bool) error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("configure requires an interactive terminal for hidden password input; alternatively edit database settings in the private config file")
+	}
+
+	input := bufio.NewReader(cmd.InOrStdin())
+	setup := databaseSetup{
+		inspect:   database.Inspect,
+		provision: database.ProvisionBackupAccount,
+		save:      func(candidate config.DatabaseConfig) error { return config.SaveDatabase(configPath, candidate) },
+	}
+	if dashboardRestores {
+		setup.restore = func(admin config.DatabaseConfig) error {
+			return configureInstallRestoreAccess(cmd, input, admin)
+		}
+	}
+	return configureDatabase(cmd.Context(), input, cmd.OutOrStdout(), previous, func() (string, error) {
+		password, err := term.ReadPassword(int(os.Stdin.Fd()))
+		return string(password), err
+	}, setup)
 }
 
 type databaseSetup struct {
 	inspect   func(context.Context, config.DatabaseConfig) database.Report
 	provision func(context.Context, config.DatabaseConfig, string, string, string, func(config.DatabaseConfig) error) error
 	save      func(config.DatabaseConfig) error
+	restore   func(config.DatabaseConfig) error
 }
 
 func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, previous config.DatabaseConfig, readSecret func() (string, error), setup databaseSetup) error {
-	fmt.Fprintln(output, "Connect the database on this machine. Supplied credentials stay in memory until a tested backup account is confirmed; admin credentials are never saved.")
+	view := newSetupOutput(output)
+	view.status("INFO", "Supplied credentials stay in memory until a tested backup account is confirmed; admin credentials are never saved.")
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -78,11 +94,16 @@ func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Write
 			return fmt.Errorf("setup canceled: %w; enrollment and existing config/key are preserved", ctx.Err())
 		}
 		if err == nil {
-			fmt.Fprintln(output, "Tested backup account saved privately. Run db-agent test to check remaining prerequisites. No service was installed and no backup was executed.")
+			view.status("OK", "Tested backup account saved privately.")
+			if setup.restore != nil {
+				return setup.restore(candidate)
+			}
+			view.status("INFO", "This database step does not install a service or execute a backup.")
+			view.detail("Diagnose", "db-agent test")
 			return nil
 		}
 
-		fmt.Fprintf(output, "Database setup: %v\n", err)
+		view.status("FAIL", fmt.Sprintf("Database setup: %v", err))
 		retry, inputErr := prompt(input, output, "Try another connection or existing backup account? [y/N]", "N")
 		if inputErr != nil || !affirmative(retry) {
 			return fmt.Errorf("%w; enrollment and existing config/key are preserved; resume with db-agent configure", err)
@@ -91,6 +112,9 @@ func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Write
 }
 
 func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, candidate config.DatabaseConfig, setup databaseSetup) error {
+	view := newSetupOutput(output)
+	view.section("Connection checks")
+	view.status("INFO", "Testing the local connection and selected database before any changes...")
 	report := setup.inspect(ctx, candidate)
 	printChecks(output, report.Checks)
 
@@ -106,15 +130,16 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 	}
 
 	candidate.Driver = report.Driver
+	view.section("Backup account")
 	statements, planErr := database.LocalBackupAccountSQL(report.Driver, report.Version, candidate.Databases, candidate.Host, report.ClientHost)
 	if planErr == nil {
 		fmt.Fprintf(output, "Database sees this connection from %q; backup account access is restricted to exact hosts, never a wildcard.\n", report.ClientHost)
 		fmt.Fprintln(output, "Least-privilege account SQL (password placeholder is replaced privately; existing accounts are never modified):")
 		for _, statement := range statements {
-			fmt.Fprintf(output, "%s;\n", statement)
+			fmt.Fprintf(output, "    %s;\n", statement)
 		}
 	} else {
-		fmt.Fprintf(output, "Automatic account creation unavailable: %v\n", planErr)
+		view.status("WARN", fmt.Sprintf("Automatic account creation unavailable: %v", planErr))
 	}
 
 	if report.CanCreateUser && planErr == nil {
@@ -123,6 +148,7 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 			return err
 		}
 		if affirmative(create) {
+			view.status("INFO", "Creating the approved scoped backup account and verifying its access...")
 			return setup.provision(ctx, candidate, report.Driver, report.Version, report.ClientHost, func(backup config.DatabaseConfig) error {
 				verified := setup.inspect(ctx, backup)
 				printChecks(output, verified.Checks)
@@ -163,7 +189,11 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 }
 
 func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous config.DatabaseConfig, readSecret func() (string, error)) (config.DatabaseConfig, error) {
-	mode, err := prompt(input, output, "Connection input: 1 = paste game-server connection string, 2 = enter manually", "1")
+	view := newSetupOutput(output)
+	view.section("Connection details")
+	fmt.Fprintln(output, "  1. Paste game-server connection string (recommended)")
+	fmt.Fprintln(output, "  2. Enter host, port, username, password, and database manually")
+	mode, err := prompt(input, output, "Connection method", "1")
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
@@ -200,7 +230,12 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 		return config.DatabaseConfig{}, err
 	}
 
-	fmt.Fprintf(output, "Local connection: host=%q port=%d user=%q databases=%q (password hidden)\n", candidate.Host, candidate.Port, candidate.User, candidate.Databases)
+	view.section("Review connection")
+	view.detail("Host", fmt.Sprintf("%q", candidate.Host))
+	view.detail("Port", strconv.Itoa(candidate.Port))
+	view.detail("User", fmt.Sprintf("%q", candidate.User))
+	view.detail("Databases", fmt.Sprintf("%q", candidate.Databases))
+	view.detail("Password", "(hidden)")
 	confirm, err := prompt(input, output, "Test this connection and backup scope? [y/N]", "N")
 	if err != nil {
 		return config.DatabaseConfig{}, err

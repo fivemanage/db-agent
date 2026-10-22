@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fivemanage/db-agent/internal/config"
 	"github.com/fivemanage/db-agent/internal/enrollment"
+	"github.com/spf13/cobra"
 )
 
 func TestEnrollmentResumesWithoutAnotherTokenOrReplacingSecrets(t *testing.T) {
@@ -80,5 +83,38 @@ func TestEnrollmentFailureDoesNotWriteConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("failed enrollment wrote config")
+	}
+}
+
+func TestInstallShowsOnlyEnrollmentStageOnEarlyFailure(t *testing.T) {
+	previousPath, previousURL, previousServiceOnly := configPath, installAPIURL, installServiceOnly
+	configPath = filepath.Join(t.TempDir(), "config.yaml")
+	installAPIURL, installServiceOnly = "://invalid", false
+	t.Cleanup(func() {
+		configPath, installAPIURL, installServiceOnly = previousPath, previousURL, previousServiceOnly
+	})
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetContext(context.Background())
+	command.SetOut(&output)
+
+	err := installCmd.RunE(command, nil)
+
+	if err == nil {
+		t.Fatal("invalid API URL accepted")
+	}
+	text := output.String()
+	for _, want := range []string{"FiveManage / Database backup setup", "[1/5] Connect to FiveManage", "[FAIL] Enrollment could not be completed."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing setup feedback %q", want)
+		}
+	}
+	for _, unwanted := range []string{"[2/5]", "[3/5]", "[4/5]", "[5/5]", "Setup complete", "[OK]", "\x1b"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("early failure emitted %q", unwanted)
+		}
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("early setup failure wrote a config")
 	}
 }

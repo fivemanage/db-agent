@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,12 @@ var installCmd = &cobra.Command{
 			return controlService(path, cmd.OutOrStdout(), services.NewController, "install", "start")
 		}
 
+		output := newSetupOutput(cmd.OutOrStdout())
+		output.title("FiveManage / Database backup setup", "Enrollment -> Database -> Recovery key -> Checks -> Service")
+		output.status("INFO", "Have your dashboard setup token and local database connection ready.")
+		output.status("WARN", "Turn off terminal recording and PowerShell transcripts before continuing.")
+		output.step(1, 5, "Connect to FiveManage", "New installs use a one-time setup token. Existing enrollment is reused.")
+
 		settings, err := ensureEnrollment(cmd.Context(), path, installAPIURL, func() (string, error) {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return "", errors.New("install requires an interactive terminal for hidden token input")
@@ -51,34 +58,54 @@ var installCmd = &cobra.Command{
 			return enrollment.Enroll(ctx, path, apiURL, token, version)
 		})
 		if err != nil {
+			output.status("FAIL", "Enrollment could not be completed. Database and recovery-key setup have not started.")
 			return err
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Enrollment saved at %s. Resuming setup does not require another token.\n", path)
+		output.status("OK", "Enrollment saved. Resuming setup does not require another token.")
+		output.detail("Config", fmt.Sprintf("%q", path))
+		output.step(2, 5, "Connect your database", "Set up read-only backups and optionally enable dashboard restores. Credentials stay on this machine.")
 		if settings.Database.Validate() == nil && len(settings.Database.Databases) > 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "Existing database settings preserved. Use db-agent configure to explicitly change them, or db-agent test to diagnose them.")
-		} else if err := configureCmd.RunE(cmd, nil); err != nil {
+			output.status("OK", "Existing database settings preserved; they will be checked in step 4.")
+			output.detail("Change", "db-agent configure")
+			if err := configureInstallRestoreAccess(cmd, bufio.NewReader(cmd.InOrStdin()), config.DatabaseConfig{}); err != nil {
+				return err
+			}
+		} else if err := configureLocalDatabase(cmd, settings.Database, true); err != nil {
 			return err
 		}
 
+		output.step(3, 5, "Save your recovery key", "Keep an offline copy. FiveManage cannot restore your backups without it.")
 		if err := configureRecoveryKey(cmd, path); err != nil {
+			output.status("FAIL", "Recovery-key setup is incomplete. Any existing key is preserved.")
+			output.detail("Resume", "db-agent configure --key")
 			return err
 		}
 
+		output.step(4, 5, "Check backup prerequisites", "Checking the database, dump tools, recovery key, and API reachability...")
 		settings, err = config.LoadDiagnostic(path)
 		if err != nil {
 			return fmt.Errorf("database settings were saved, but prerequisites could not be checked: %w; retry with db-agent test", err)
 		}
 		if !printChecks(cmd.OutOrStdout(), diagnostic.Run(cmd.Context(), settings)) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Correct the failed prerequisites and rerun db-agent test. Enrollment and database settings remain saved; no existing key was changed.")
+			output.status("FAIL", "Prerequisites need attention. The service was not installed or started.")
+			output.status("INFO", "Enrollment and database settings remain saved; no existing key was changed.")
+			output.detail("Next", "Correct the failed checks, then rerun db-agent install.")
 			return errors.New("setup incomplete: prerequisites failed; service was not installed or started; no working backup exists yet")
 		}
+		output.status("OK", "All backup prerequisites passed. These checks do not execute a backup.")
 
+		output.step(5, 5, "Start the background service", "Installing and starting the service with your saved configuration...")
 		if err := controlService(path, cmd.OutOrStdout(), services.NewController, "install", "start"); err != nil {
+			output.status("FAIL", "Service setup did not finish. Enrollment, database settings, and the recovery key remain saved.")
 			return err
 		}
 
-		fmt.Fprintln(cmd.OutOrStdout(), "Service started. Backups run in the background; use db-agent status to check the first outcome.")
+		output.section("Setup complete")
+		output.status("OK", "Service started. Backups run in the background.")
+		output.status("INFO", "A running service is not proof of a completed backup.")
+		output.detail("Next", "db-agent status  (check the first backup outcome)")
+		output.detail("Diagnose", "db-agent test")
 		return nil
 	},
 }

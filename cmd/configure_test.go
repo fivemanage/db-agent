@@ -111,6 +111,36 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 	if strings.Contains(output.String(), "private-backup-password") {
 		t.Fatal("backup password leaked")
 	}
+	text := output.String()
+	for _, want := range []string{"Connection details", "Review connection", "Connection checks", "Backup account", "[FAIL] Database setup:", "[OK] Tested backup account saved privately."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing setup feedback %q", want)
+		}
+	}
+	if strings.ContainsAny(text, "\x1b\r") {
+		t.Fatal("redirected wizard output contains terminal control sequences")
+	}
+}
+
+func TestConnectionReviewHidesSecretsAndEscapesTerminalContent(t *testing.T) {
+	var output bytes.Buffer
+	connection := "mysql://backup%1B%5B31m:private-review-password@127.0.0.1/game"
+	input := bufio.NewReader(strings.NewReader("1\ny\n"))
+
+	candidate, err := promptDatabaseConnection(input, &output, config.DatabaseConfig{}, func() (string, error) { return connection, nil })
+	if err != nil || candidate.User != "backup\x1b[31m" || candidate.Password != "private-review-password" {
+		t.Fatalf("connection review failed: %v", err)
+	}
+
+	text := output.String()
+	for _, want := range []string{"Review connection", "Host         \"127.0.0.1\"", "Port         3306", `User         "backup\x1b[31m"`, `Databases    ["game"]`, "Password     (hidden)"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing connection detail %q", want)
+		}
+	}
+	if strings.ContainsRune(text, '\x1b') || strings.Contains(text, connection) || strings.Contains(text, candidate.Password) {
+		t.Fatal("connection review emitted a secret or terminal escape")
+	}
 }
 
 func TestWizardApprovesObservedClientHostBeforeProvisioning(t *testing.T) {
