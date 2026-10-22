@@ -1,0 +1,32 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    network_mode: none
+    environment:
+      MARIADB_ROOT_PASSWORD: restore_proof_root
+    command:
+      - --event-scheduler=ON
+      - --log-bin-trust-function-creators=ON
+    tmpfs:
+      - /var/lib/mysql:rw,nosuid,noexec,size=1073741824
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  mysql:
+    image: mysql:8.4
+    network_mode: none
+    environment:
+      MYSQL_ROOT_PASSWORD: restore_proof_root
+    command:
+      - --event-scheduler=ON
+      - --log-bin-trust-function-creators=ON
+    tmpfs:
+      - /var/lib/mysql:rw,nosuid,noexec,size=1073741824
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prestore_proof_root"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

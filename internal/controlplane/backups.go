@@ -52,6 +52,8 @@ type CompleteBackupRequest struct {
 type DownloadBackupResponse struct {
 	DownloadURL string    `json:"download_url"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	SizeBytes   int64     `json:"size_bytes"`
+	Checksum    string    `json:"checksum"`
 }
 
 func (c *Client) InitiateBackup(ctx context.Context, input InitiateBackupRequest) (InitiateBackupResponse, error) {
@@ -124,8 +126,8 @@ func (c *Client) DownloadBackup(ctx context.Context, backupID string) (DownloadB
 	}
 
 	var result DownloadBackupResponse
-	if json.Unmarshal(contents, &result) != nil || !validTransferURL(result.DownloadURL, result.ExpiresAt) {
-		return DownloadBackupResponse{}, errors.New("invalid backup download response; expected an unexpired HTTPS URL")
+	if json.Unmarshal(contents, &result) != nil || !validTransferURL(result.DownloadURL, result.ExpiresAt) || result.SizeBytes < 85 || !checksumPattern.MatchString(result.Checksum) {
+		return DownloadBackupResponse{}, errors.New("invalid backup download response; expected an unexpired HTTPS URL, encrypted size, and SHA-256 checksum")
 	}
 
 	return result, nil

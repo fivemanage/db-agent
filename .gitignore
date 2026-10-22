@@ -1,2 +1,5 @@
 test-data
 /bin/
+
+*.md
+!README.md

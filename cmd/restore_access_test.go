@@ -1,0 +1,93 @@
+package cmd
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/fivemanage/db-agent/internal/config"
+	"github.com/fivemanage/db-agent/internal/database"
+)
+
+func TestRestoreSetupRequiresExplicitApprovalAndNeverEchoesSecrets(t *testing.T) {
+	for _, scenario := range []string{"success", "decline_test", "decline_authorization", "bad_grants", "check_timeout", "raw_check_error", "save_error", "secret_error", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			backup := config.DatabaseConfig{Driver: "mysql", Host: "127.0.0.1", Port: 3306, User: "backup", Password: "backup-private", Databases: []string{"game"}}
+			input := "restore_setup\ny\nAUTHORIZE\n"
+			if scenario == "decline_test" {
+				input = "restore_setup\nn\n"
+			}
+			if scenario == "decline_authorization" {
+				input = "restore_setup\ny\nn\n"
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if scenario == "cancel" {
+				cancel()
+			}
+			checked, saved := false, false
+			var output bytes.Buffer
+			err := authorizeRestoreAccess(ctx, bufio.NewReader(strings.NewReader(input)), &output, backup,
+				func() (string, error) {
+					if scenario == "secret_error" {
+						return "", errors.New("restore-private")
+					}
+					return "restore-private", nil
+				},
+				func(_ context.Context, original config.DatabaseConfig, access config.RestoreConfig) error {
+					checked = true
+					if original.User != "backup" || access.User != "restore_setup" || access.Password != "restore-private" || !access.Authorized {
+						t.Fatal("restore setup reused or changed the backup account")
+					}
+					if scenario == "bad_grants" {
+						return database.ErrRestorePrivileges
+					}
+					if scenario == "check_timeout" {
+						return context.DeadlineExceeded
+					}
+					if scenario == "raw_check_error" {
+						return errors.New("restore-private raw checker failure")
+					}
+					return nil
+				},
+				func(config.RestoreConfig) error {
+					saved = true
+					if scenario == "save_error" {
+						return errors.New("restore-private raw storage failure")
+					}
+					return nil
+				})
+			if (err == nil) != (scenario == "success") || saved != (scenario == "success" || scenario == "save_error") {
+				t.Fatalf("wrong confirmation/save behavior: %v", err)
+			}
+			if checked != (scenario != "decline_test" && scenario != "secret_error" && scenario != "cancel") {
+				t.Fatal("account checks ran without approval or after cancellation")
+			}
+			for _, secret := range []string{"restore-private", "backup-private"} {
+				if strings.Contains(output.String(), secret) || err != nil && strings.Contains(err.Error(), secret) {
+					t.Fatal("restore setup echoed credentials or raw errors")
+				}
+			}
+		})
+	}
+}
+
+func TestRestoreSetupRejectsBackupAndRootAccountsBeforeConnection(t *testing.T) {
+	backup := config.DatabaseConfig{Driver: "mariadb", Host: "localhost", Port: 3306, User: "backup", Databases: []string{"game"}}
+	for _, user := range []string{"backup", "root"} {
+		var output bytes.Buffer
+		err := authorizeRestoreAccess(context.Background(), bufio.NewReader(strings.NewReader(user+"\ny\nAUTHORIZE\n")), &output, backup,
+			func() (string, error) { return "private", nil },
+			func(context.Context, config.DatabaseConfig, config.RestoreConfig) error {
+				t.Fatal("unsafe account was connected")
+				return nil
+			},
+			func(config.RestoreConfig) error { t.Fatal("unsafe account was saved"); return nil })
+		if !errors.Is(err, config.ErrRestoreAuthorization) {
+			t.Fatal("unsafe account was accepted")
+		}
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/fivemanage/db-agent/internal/key"
+	"github.com/fivemanage/db-agent/internal/restorejob"
 	"github.com/spf13/cobra"
 )
 
@@ -35,11 +36,98 @@ func TestAgentCredentialRejectionDoesNotStartUpdater(t *testing.T) {
 			t.Error("scheduling started with a rejected initial credential")
 			return nil
 		},
+		restores: func(context.Context) error { t.Error("restore delivery started with rejected credentials"); return nil },
 	}, true)
 	if !errors.Is(err, controlplane.ErrCredentialRejected) {
 		t.Fatalf("rejection not returned: %v", err)
 	}
 }
+
+func TestAgentUpdateHandoffJoinsRestoreWithoutStallingHeartbeats(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started, stopped, heartbeat := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var output bytes.Buffer
+	err := runAgent(ctx, &output, &output, agentWork{
+		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
+			report(controlplane.Result{Connection: controlplane.Connected})
+			select {
+			case <-started:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			report(controlplane.Result{Connection: controlplane.Connected})
+			close(heartbeat)
+			<-ctx.Done()
+			return nil
+		},
+		restores: func(ctx context.Context) error { close(started); <-ctx.Done(); close(stopped); return nil },
+		update: func(ctx context.Context) (bool, error) {
+			select {
+			case <-heartbeat:
+				return true, nil
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("update handoff left restore execution running")
+	}
+}
+
+func TestAgentRestoreFailuresPreserveBackupsUnlessCredentialsRejected(t *testing.T) {
+	for _, failure := range []error{nil, restorejob.ErrState, controlplane.ErrCredentialRejected} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		started, backupStopped := make(chan struct{}), make(chan struct{})
+		var output bytes.Buffer
+		notice := agentTestWriter(func(data []byte) (int, error) {
+			n, err := output.Write(data)
+			if bytes.Contains(data, []byte("backup and heartbeat workers continue")) {
+				cancel()
+			}
+			return n, err
+		})
+		err := runAgent(ctx, notice, notice, agentWork{
+			heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
+				report(controlplane.Result{Connection: controlplane.Connected})
+				<-ctx.Done()
+				return nil
+			},
+			backups: func(ctx context.Context) error { close(started); <-ctx.Done(); close(backupStopped); return nil },
+			restores: func(ctx context.Context) error {
+				select {
+				case <-started:
+					return failure
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		}, false)
+		cancel()
+		if errors.Is(failure, controlplane.ErrCredentialRejected) {
+			if !errors.Is(err, failure) {
+				t.Fatal("restore credential rejection did not stop agent work")
+			}
+		} else if err != nil || !strings.Contains(output.String(), "backup and heartbeat workers continue") {
+			t.Fatal("restore availability failure stopped backups or was not explained")
+		}
+		select {
+		case <-backupStopped:
+		default:
+			t.Fatal("service shutdown did not join backups")
+		}
+	}
+}
+
+type agentTestWriter func([]byte) (int, error)
+
+func (w agentTestWriter) Write(data []byte) (int, error) { return w(data) }
 
 func TestAgentHeartbeatsContinueDuringSlowUpdateAndShutdownJoinsWorkers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

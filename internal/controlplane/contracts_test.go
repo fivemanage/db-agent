@@ -101,7 +101,7 @@ func TestBackupContractsUseAPIAuthAndStableInitiationIdentity(t *testing.T) {
 			if r.Method != http.MethodGet {
 				t.Error("download lookup must be GET")
 			}
-			json.NewEncoder(w).Encode(DownloadBackupResponse{DownloadURL: "https://storage.example/object?signature=private", ExpiresAt: expires})
+			json.NewEncoder(w).Encode(DownloadBackupResponse{DownloadURL: "https://storage.example/object?signature=private", ExpiresAt: expires, SizeBytes: 100, Checksum: "sha256:" + strings.Repeat("a", 64)})
 		default:
 			t.Error("unexpected control-plane path")
 			w.WriteHeader(404)
@@ -146,12 +146,29 @@ func TestUnsafeBackupRequestsNeverReachNetwork(t *testing.T) {
 func TestUnsafeTransferURLsAreRejectedWithoutEchoingSignatures(t *testing.T) {
 	for _, target := range []string{"http://storage.example/private-signature", "https://user:private-signature@storage.example/object", "https://storage.example/object#private-signature"} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(DownloadBackupResponse{DownloadURL: target, ExpiresAt: time.Now().Add(time.Hour)})
+			json.NewEncoder(w).Encode(DownloadBackupResponse{DownloadURL: target, ExpiresAt: time.Now().Add(time.Hour), SizeBytes: 100, Checksum: "sha256:" + strings.Repeat("a", 64)})
 		}))
 		_, err := testClient(t, server.URL).DownloadBackup(context.Background(), "backup")
 		server.Close()
 		if err == nil || strings.Contains(err.Error(), "private-signature") {
 			t.Fatal("unsafe transfer URL accepted or exposed")
+		}
+	}
+}
+
+func TestDownloadRequiresTrustedIntegrityMetadata(t *testing.T) {
+	for _, metadata := range []string{
+		``, `,"size_bytes":100`, `,"checksum":"sha256:` + strings.Repeat("a", 64) + `"`,
+		`,"size_bytes":-1,"checksum":"sha256:` + strings.Repeat("a", 64) + `"`,
+		`,"size_bytes":100,"checksum":"private-checksum"`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			io.WriteString(w, `{"download_url":"https://storage.example/private-signature","expires_at":"2099-01-01T00:00:00Z"`+metadata+`}`)
+		}))
+		_, err := testClient(t, server.URL).DownloadBackup(context.Background(), "backup_1")
+		server.Close()
+		if err == nil || strings.Contains(err.Error(), "private") {
+			t.Fatalf("unsafe download metadata accepted or exposed: %v", err)
 		}
 	}
 }

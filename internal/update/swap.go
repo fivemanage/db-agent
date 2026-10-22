@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/fivemanage/db-agent/internal/operation"
 )
 
 type Restart struct {
@@ -103,6 +105,16 @@ func RunHelper(target, staged, checksum, expectedVersion string, restart Restart
 	if err := verifyFile(staged, checksum); err != nil {
 		return err
 	}
+	if !filepath.IsAbs(restart.ConfigPath) {
+		return errors.New("update helper requires the absolute agent config path for operation exclusion")
+	}
+	// Handoff may have raced another process after staging. Never stop the
+	// service or replace its binary while backup/restore owns this OS lock.
+	unlock, err := waitForOperations(filepath.Join(filepath.Dir(restart.ConfigPath), "backup-transfer"), 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	backup := target + ".rollback"
 	if _, err := os.Stat(backup); err == nil {
 		return fmt.Errorf("previous rollback binary still exists: %s", backup)
@@ -160,6 +172,20 @@ func RunHelper(target, staged, checksum, expectedVersion string, restart Restart
 		return fmt.Errorf("new agent restart failed; old binary restored: %w", err)
 	}
 	return nil
+}
+
+func waitForOperations(dir string, budget time.Duration) (func(), error) {
+	deadline := time.Now().Add(budget)
+	for {
+		unlock, err := operation.TryLock(dir)
+		if err == nil {
+			return unlock, nil
+		}
+		if !errors.Is(err, operation.ErrBusy) || time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func verifyInstalledVersion(target, expected string) error {

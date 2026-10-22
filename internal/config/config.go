@@ -25,6 +25,7 @@ type Config struct {
 	APIURL          string           `mapstructure:"api_url" yaml:"api_url"`
 	UpdateURL       string           `mapstructure:"update_url" yaml:"update_url"`
 	Database        DatabaseConfig   `mapstructure:"database" yaml:"database"`
+	Restore         RestoreConfig    `mapstructure:"restore" yaml:"restore,omitempty" json:"-"`
 	Backup          BackupConfig     `mapstructure:"backup" yaml:"backup"`
 	Encryption      EncryptionConfig `mapstructure:"encryption" yaml:"encryption"`
 	AutoUpdate      bool             `mapstructure:"auto_update" yaml:"auto_update"`

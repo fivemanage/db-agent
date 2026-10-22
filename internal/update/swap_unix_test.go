@@ -24,7 +24,7 @@ func TestRunHelperRestoresOldExecutableWhenRestartFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := sha256.Sum256(newBinary)
-	err := RunHelper(target, staged, hex.EncodeToString(hash[:]), "1.1.0", Restart{})
+	err := RunHelper(target, staged, hex.EncodeToString(hash[:]), "1.1.0", Restart{ConfigPath: filepath.Join(filepath.Dir(target), "config.yaml")})
 	if err == nil || !strings.Contains(err.Error(), "old binary restored") {
 		t.Fatalf("RunHelper() = %v, want rollback error", err)
 	}
@@ -47,7 +47,7 @@ func TestRunHelperInstallsVerifiedExecutableWithoutRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := sha256.Sum256(newBinary)
-	if err := RunHelper(target, staged, hex.EncodeToString(hash[:]), "1.1.0", Restart{NoRestart: true}); err != nil {
+	if err := RunHelper(target, staged, hex.EncodeToString(hash[:]), "1.1.0", Restart{NoRestart: true, ConfigPath: filepath.Join(filepath.Dir(target), "config.yaml")}); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(target)

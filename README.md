@@ -2,15 +2,16 @@
 
 Customer-hosted MySQL/MariaDB backup agent for FiveManage. **Work in progress:**
 registration, local database setup, recovery-key generation, diagnostics,
-foreground/service heartbeats, signed updates, and scheduled/manual encrypted backups/uploads
-exist. The restore CLI is not implemented yet. A passing diagnostic
-or running service does not mean a backup exists.
+foreground/service heartbeats, signed updates, scheduled/manual encrypted backups/uploads,
+and local SQL recovery exist. Dashboard-triggered restore/import is implemented,
+with release qualification still pending under DEV-577. A passing diagnostic or
+running service does not mean a backup exists.
 
 The streaming backup codec is implemented in `internal/artifact`: zstd (default)
 or gzip, locally encrypted with chunked AES-256-GCM, with encrypted size/SHA-256
 metadata and restore decoding. `backup --now` runs this pipeline. See
 [ARTIFACT.md](ARTIFACT.md) for the versioned format, security constraints, and
-future upload/restore integration.
+backup/restore integration.
 
 The scoped logical dump executor is implemented in `internal/dump`, with private
 client credentials, timeouts, process-tree cancellation, and output throttling.
@@ -263,6 +264,72 @@ clears the next run. After a crash the timestamp may be stale: this command show
 **recorded state, not live service health**. Remote "Back up now" polling is deferred:
 the current heartbeat response has no stable request/acknowledgement contract.
 
+### Recover SQL from a backup (DEV-499)
+
+```sh
+db-agent restore --backup-id <id>
+```
+
+**The existing local key is used automatically.** No key paste, terminal prompt,
+or upload is needed. Run as the installed service/Administrator account with the
+same private config (use `--config` if it is not at the default location).
+Restore does not require the original database, dump tools, or a working backup
+schedule. It writes `restore.sql` by default; `--output <new-path>` chooses another
+file. Existing files are never overwritten.
+
+For an already-downloaded backup, the same local key is used automatically:
+
+```sh
+db-agent restore --file ./backup.dbak --output ./recovered.sql
+```
+
+If the original server was lost, use an encrypted file and the original saved
+key **file** on the replacement machine; no config, enrollment, or API access is
+required:
+
+```sh
+db-agent restore --file ./backup.dbak --key-file ./recovery.key
+```
+
+The saved key file must be private (`0600` on Unix; protected
+System/Administrators ACL on Windows). Never put key contents in command-line
+arguments. Without either the original local key or its saved copy, restoration
+is impossible; FiveManage has no copy.
+
+**This command recovers SQL; it does not import it or change a database.** The
+SQL contains the original database names, including `CREATE DATABASE` and `USE`.
+Selecting another default database in the SQL client does **not** redirect it.
+Use an isolated restore server for manual import, following the printed guidance.
+Do not import into production or attempt schema remapping with text replacement.
+
+Defaults bound the complete operation to two hours, encrypted input to 1 GiB,
+and SQL output to 16 GiB, retaining 256 MiB of free disk space. `--timeout` and
+`--max-output-bytes` can explicitly adjust duration/output limits. SQL is staged
+privately, fully authenticated/decompressed, and only then published. Handled
+failures/cancellation remove staged output. A hard crash can leave a protected
+`.db-agent-restore-*` file; an administrator should remove it after confirming no
+restore is running. Verified SQL is sensitive: protect and remove it when done.
+
+See [RESTORE.md](RESTORE.md) for the download/integrity contract. Dashboard
+Restore is implemented separately: it uses the installed key automatically,
+imports supported SQL into a new isolated database, and reports progress/outcome.
+It never switches the application or overwrites production. Routines/triggers/
+events and unsupported SQL stop the entire job before writes. This flow still
+needs release qualification, not just successful SQL recovery tests; see
+[RESTORE-JOBS.md](RESTORE-JOBS.md) and
+[RESTORE-QUALIFICATION.md](RESTORE-QUALIFICATION.md).
+
+Optional local authorization setup is available with
+`db-agent configure --restore-access --config ./config.yaml`. It verifies an
+**existing dedicated provisioning account** and saves separate credentials only
+after explicit confirmation; it does not create users, change grants, run an
+import, or contact the dashboard. The running agent advertises readiness separately.
+This authority includes global
+SQL account-management permission and must never execute backup SQL directly.
+See [RESTORE-ISOLATION.md](RESTORE-ISOLATION.md#explicit-local-restore-access)
+for the permission template and restrictions. Never
+paste database passwords or recovery keys into chat or the dashboard.
+
 ### Run as a system service (DEV-491)
 
 Place a built/released binary at its permanent location before installing; the
@@ -365,12 +432,13 @@ reread on restart.
 Typed client methods define `POST /api/v1/backups/initiate`,
 `POST /api/v1/backups/{id}/complete`, and `GET /api/v1/backups/{id}/download`.
 Initiation requires an `Idempotency-Key` persisted once per backup run by the
-future orchestrator. Completion must be idempotent for the same terminal outcome.
+orchestrator. Completion must be idempotent for the same terminal outcome.
 The client validates resource IDs, metadata, checksums, and unexpired HTTPS
 transfer URLs; it never sends agent credentials to object storage or performs
-the transfer itself. The server-side backup/storage endpoints remain DEV-514;
-streaming upload/restore/orchestration remain their separate tasks. See `SPEC.md`
-for the exact contracts.
+the transfer itself. Download lookup requires trusted encrypted size and SHA-256
+metadata. Transfers are implemented separately in `internal/transfer` and
+`internal/restore`; the matching DEV-514 endpoints/storage must be deployed in
+the control plane. See `SPEC.md` for the exact contracts.
 
 ### Logical dump prerequisites
 

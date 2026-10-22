@@ -65,6 +65,10 @@ func Inspect(ctx context.Context, settings config.DatabaseConfig) Report {
 }
 
 func openDatabase(settings config.DatabaseConfig) (*sql.DB, error) {
+	return openDatabaseReadTimeout(settings, Timeout)
+}
+
+func openDatabaseReadTimeout(settings config.DatabaseConfig, readTimeout time.Duration) (*sql.DB, error) {
 	c := mysql.NewConfig()
 	c.User, c.Passwd = settings.User, settings.Password
 	host := settings.Host
@@ -72,7 +76,8 @@ func openDatabase(settings config.DatabaseConfig) (*sql.DB, error) {
 		host = "127.0.0.1"
 	}
 	c.Net, c.Addr = "tcp", net.JoinHostPort(host, strconv.Itoa(settings.Port))
-	c.Timeout, c.ReadTimeout, c.WriteTimeout = Timeout, Timeout, Timeout
+	c.Timeout, c.ReadTimeout, c.WriteTimeout = Timeout, readTimeout, Timeout
+	c.MultiStatements, c.AllowAllFiles, c.InterpolateParams = false, false, false
 	// Driver logging can include untrusted server messages. Diagnostics expose
 	// only classified errors, never raw errors or the DSN.
 	c.Logger = log.New(io.Discard, "", 0)

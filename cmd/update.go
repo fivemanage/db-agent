@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fivemanage/db-agent/internal/config"
+	"github.com/fivemanage/db-agent/internal/operation"
 	"github.com/fivemanage/db-agent/internal/update"
 	"github.com/spf13/cobra"
 )
@@ -37,7 +38,7 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 	}, nil
 }
 
-func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, restartAgent bool) (bool, error) {
+func checkAndMaybeInstall(ctx context.Context, path string, settings config.Config, install, restartAgent bool) (bool, error) {
 	if install && runtime.GOOS == "darwin" && os.Getenv("DB_AGENT_SERVICE_NAME") != "" {
 		return false, errors.New("signed updates cannot restart a launchd service yet; stop the service and update manually")
 	}
@@ -51,6 +52,15 @@ func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, 
 	if err != nil || !available || !install {
 		return available, err
 	}
+	resolvedConfig, err := filepath.Abs(config.ResolvePath(path))
+	if err != nil {
+		return false, errors.New("cannot resolve update operation state")
+	}
+	unlock, err := operation.TryLock(filepath.Join(filepath.Dir(resolvedConfig), "backup-transfer"))
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 
 	executablePath, err := os.Executable()
 	if err != nil {
@@ -69,7 +79,7 @@ func checkAndMaybeInstall(ctx context.Context, settings config.Config, install, 
 	serviceName := os.Getenv("DB_AGENT_SERVICE_NAME")
 	if err := update.LaunchHelper(executablePath, stagedPath, manifest.SHA256, manifest.Version, update.Restart{
 		ServiceName: serviceName,
-		ConfigPath:  config.ResolvePath(configPath),
+		ConfigPath:  resolvedConfig,
 		NoRestart:   !restartAgent && serviceName == "",
 	}); err != nil {
 		os.Remove(stagedPath)
@@ -91,7 +101,7 @@ var updateCheckCmd = &cobra.Command{
 			return err
 		}
 
-		available, err := checkAndMaybeInstall(cmd.Context(), settings, false, false)
+		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, false, false)
 		if err != nil {
 			return err
 		}
@@ -115,7 +125,7 @@ var updateNowCmd = &cobra.Command{
 			return err
 		}
 
-		available, err := checkAndMaybeInstall(cmd.Context(), settings, true, false)
+		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, true, false)
 		if err != nil {
 			return err
 		}

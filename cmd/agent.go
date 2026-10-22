@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/fivemanage/db-agent/internal/diagnostic"
+	"github.com/fivemanage/db-agent/internal/restorejob"
 	"github.com/spf13/cobra"
 )
 
@@ -73,6 +75,10 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	if err != nil {
 		return err
 	}
+	restores, err := restorejob.NewWorker(path, client, restorejob.Options{})
+	if err != nil {
+		return err
+	}
 
 	return runAgent(ctx, output, errorOutput, agentWork{
 		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
@@ -83,13 +89,14 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 		backups: func(ctx context.Context) error {
 			return runScheduledBackups(ctx, path, scheduler, runner, client, state.Status == controlplane.Idle, output, errorOutput)
 		},
+		restores: restores.Run,
 		update: func(ctx context.Context) (bool, error) {
 			effective, err := config.LoadAgent(path)
 			if err != nil || !effective.AutoUpdate {
 				return false, err
 			}
 
-			return checkAndMaybeInstall(ctx, effective, true, true)
+			return checkAndMaybeInstall(ctx, path, effective, true, true)
 		},
 	}, autoUpdate)
 }
@@ -109,6 +116,7 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 type agentWork struct {
 	heartbeats func(context.Context, func(controlplane.Result)) error
 	backups    func(context.Context) error
+	restores   func(context.Context) error
 	update     func(context.Context) (bool, error)
 }
 
@@ -141,6 +149,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 	reports := make(chan controlplane.Result, 1)
 	heartbeatDone := make(chan error, 1)
 	backupDone := make(chan error, 1)
+	restoreDone := make(chan error, 1)
 	updates := make(chan updateResult, 1)
 
 	workers.Add(1)
@@ -158,6 +167,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 	var previous controlplane.Connection
 	updaterStarted := false
 	backupsStarted := false
+	restoresStarted := false
 	fmt.Fprintln(output, "Agent started. A heartbeat confirms connectivity, not a completed backup.")
 
 	for {
@@ -191,6 +201,11 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 					backupDone <- work.backups(ctx)
 				}()
 			}
+			if !restoresStarted && work.restores != nil && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
+				restoresStarted = true
+				workers.Add(1)
+				go func() { defer workers.Done(); restoreDone <- work.restores(ctx) }()
+			}
 			if autoUpdate && !updaterStarted && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
 				updaterStarted = true
 				workers.Add(1)
@@ -201,6 +216,16 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 			}
 		case err := <-backupDone:
 			return err
+		case err := <-restoreDone:
+			if errors.Is(err, controlplane.ErrCredentialRejected) {
+				return err
+			}
+			if ctx.Err() == nil {
+				if err != nil {
+					fmt.Fprintf(errorOutput, "Restore delivery stopped: %v\n", err)
+				}
+				fmt.Fprintln(errorOutput, "Restore delivery is unavailable; backup and heartbeat workers continue. Check local restore access/state and restart the service after resolving it.")
+			}
 		case result := <-updates:
 			if result.err != nil {
 				fmt.Fprintf(errorOutput, "Update check failed: %v\n", result.err)

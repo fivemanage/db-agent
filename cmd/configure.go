@@ -17,6 +17,7 @@ import (
 )
 
 var configureKeyOnly bool
+var configureRestoreAccess bool
 
 var configureCmd = &cobra.Command{
 	Use:   "configure",
@@ -26,6 +27,9 @@ var configureCmd = &cobra.Command{
 		settings, err := config.LoadDiagnostic(configPath)
 		if err != nil {
 			return err
+		}
+		if configureRestoreAccess {
+			return configureLocalRestoreAccess(cmd, settings)
 		}
 
 		if err := settings.ValidateAgent(); err != nil {
@@ -323,5 +327,7 @@ func selectDatabases(choice string, visible []string) ([]string, error) {
 
 func init() {
 	configureCmd.Flags().BoolVar(&configureKeyOnly, "key", false, "set up or acknowledge the local recovery key without changing database settings")
+	configureCmd.Flags().BoolVar(&configureRestoreAccess, "restore-access", false, "explicitly authorize a separate local restore provisioning account")
+	configureCmd.MarkFlagsMutuallyExclusive("key", "restore-access")
 	rootCmd.AddCommand(configureCmd)
 }

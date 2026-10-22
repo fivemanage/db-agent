@@ -68,6 +68,20 @@ func Read(path string, maxBytes int64) ([]byte, error) {
 
 // Open validates a private regular file without reading its contents into memory.
 func Open(path string, maxBytes int64) (*os.File, error) {
+	file, err := OpenRegular(path, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPermissions(file); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+// OpenRegular rejects links and special files but permits public ciphertext files.
+// Secrets must use Open, which additionally validates private permissions.
+func OpenRegular(path string, maxBytes int64) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -87,10 +101,12 @@ func Open(path string, maxBytes int64) (*os.File, error) {
 		return nil, ErrUnsafe
 	}
 
-	if err := checkPermissions(file); err != nil {
-		file.Close()
-		return nil, err
-	}
-
 	return file, nil
+}
+
+// Publish atomically publishes a complete, synced file without replacing any
+// destination. Stage in the destination directory and retain private permissions.
+// A directory-sync error may leave a complete destination; never delete it on error.
+func Publish(from, to string) error {
+	return publish(from, to)
 }

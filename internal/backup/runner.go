@@ -5,18 +5,16 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/fivemanage/db-agent/internal/artifact"
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/key"
-	"github.com/fivemanage/db-agent/internal/securefile"
+	"github.com/fivemanage/db-agent/internal/operation"
 	"github.com/fivemanage/db-agent/internal/transfer"
 )
 
 var (
-	ErrRunning = errors.New("a backup is already running; wait for it to finish before retrying db-agent backup --now")
+	ErrRunning = errors.New("a backup or restore is already running; wait for it to finish before retrying db-agent backup --now")
 	ErrQueued  = errors.New("a backup upload or completion is still queued; restore control-plane connectivity and let the agent retry before starting another backup")
 	ErrState   = errors.New("cannot access private backup run state; check permissions and run db-agent test")
 	ErrFailed  = errors.New("backup failed; run db-agent test and check local backup status before retrying")
@@ -115,11 +113,8 @@ func (r *Runner) Resume(ctx context.Context) error {
 }
 
 func (r *Runner) lock() (func(), error) {
-	if err := os.MkdirAll(r.dir, 0700); err != nil {
-		return nil, &safeError{ErrState, err}
-	}
-	unlock, err := securefile.TryLock(filepath.Join(r.dir, ".run.lock"))
-	if errors.Is(err, securefile.ErrLocked) {
+	unlock, err := operation.TryLock(r.dir)
+	if errors.Is(err, operation.ErrBusy) {
 		return nil, &safeError{ErrRunning, err}
 	}
 	if err != nil {
