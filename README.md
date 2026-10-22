@@ -27,8 +27,9 @@ make check      # Go tests and vet
 ```
 
 Builds default to version `dev`; override it with `make build VERSION=0.1.0`.
-These are unsigned development builds. See [RELEASE.md](RELEASE.md) for tagged
-release CI, secret-free builds, signing, provenance, and verification.
+These are unsigned development builds. Tagged releases use the
+[release workflow](.github/workflows/release.yml) for builds, signing, provenance,
+and verification.
 `go run . <command>` compiles the current source
 automatically, so it does not require a separate build.
 
