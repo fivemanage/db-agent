@@ -57,7 +57,7 @@ jobs:
           bash scripts/build-release.sh "$RELEASE_VERSION" "$RELEASE_PUBLIC_KEY" "$RELEASE_API_URL" dist
           bash scripts/build-release.sh "$RELEASE_VERSION" "$RELEASE_PUBLIC_KEY" "$RELEASE_API_URL" "$RUNNER_TEMP/rebuild"
           diff --recursive dist "$RUNNER_TEMP/rebuild"
-      - name: SPDX SBOM from the four executables only
+      - name: SPDX SBOM from the three executables only
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: dist
@@ -125,7 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-2022, ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+        runner: [windows-2022, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:

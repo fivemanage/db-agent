@@ -26,6 +26,9 @@ func Config(path string) (*manager.Config, error) {
 }
 
 func configFor(executable, path, goos string) (*manager.Config, error) {
+	if goos != "windows" && goos != "linux" {
+		return nil, fmt.Errorf("unsupported service platform %q; use Windows Service or Linux systemd", goos)
+	}
 	if path == "" {
 		return nil, errors.New("service config path is required")
 	}
@@ -58,8 +61,6 @@ func configFor(executable, path, goos string) (*manager.Config, error) {
 			"StartType":        "automatic",
 			"DelayedAutoStart": true,
 			"Restart":          "on-failure",
-			"RunAtLoad":        true,
-			"KeepAlive":        false,
 			"UserService":      false,
 		},
 	}
@@ -72,10 +73,10 @@ func configFor(executable, path, goos string) (*manager.Config, error) {
 func New(program manager.Interface, cfg *manager.Config) (manager.Service, error) {
 	svc, err := manager.New(program, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("service manager unavailable; use Windows Service, Linux systemd, or macOS launchd: %w", err)
+		return nil, fmt.Errorf("service manager unavailable; use Windows Service or Linux systemd: %w", err)
 	}
 	switch svc.Platform() {
-	case "windows-service", "linux-systemd", "darwin-launchd":
+	case "windows-service", "linux-systemd":
 		return svc, nil
 	default:
 		return nil, fmt.Errorf("unsupported service manager %q; Linux requires systemd", svc.Platform())

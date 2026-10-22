@@ -66,7 +66,7 @@ func hostFactory(platform string, hostErr error) func(manager.Interface, *manage
 }
 
 func TestServiceHostExitsWhenWorkFinishes(t *testing.T) {
-	for _, platform := range []string{"linux-systemd", "darwin-launchd", "windows-service"} {
+	for _, platform := range []string{"linux-systemd", "windows-service"} {
 		for _, failure := range []bool{false, true} {
 			t.Run(platform+map[bool]string{true: "/failure", false: "/update-handoff"}[failure], func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -95,7 +95,7 @@ func TestServiceHostExitsWhenWorkFinishes(t *testing.T) {
 }
 
 func TestServiceParentCancellationJoinsWorker(t *testing.T) {
-	for _, platform := range []string{"linux-systemd", "darwin-launchd", "windows-service"} {
+	for _, platform := range []string{"linux-systemd", "windows-service"} {
 		t.Run(platform, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

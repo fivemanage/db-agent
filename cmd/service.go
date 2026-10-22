@@ -80,8 +80,7 @@ var serviceRunCmd = &cobra.Command{
 				errorOutput = serviceLogWriter{log: logger.Error}
 			}
 
-			// launchd replacement/restart is not implemented by the signed updater.
-			err := runConfiguredAgent(ctx, path, output, errorOutput, version != "dev" && runtime.GOOS != "darwin")
+			err := runConfiguredAgent(ctx, path, output, errorOutput, version != "dev")
 			if err != nil {
 				fmt.Fprintf(errorOutput, "Agent stopped: %v\n", err)
 			}

@@ -195,7 +195,6 @@ func TestDefaultPathForOS(t *testing.T) {
 		{name: "Windows default", goos: "windows", want: `C:\ProgramData\db-agent\config.yaml`},
 		{name: "Windows ProgramData", goos: "windows", programData: `D:\ProgramData`, want: `D:\ProgramData\db-agent\config.yaml`},
 		{name: "Linux", goos: "linux", want: "/etc/db-agent/config.yaml"},
-		{name: "macOS", goos: "darwin", want: "/etc/db-agent/config.yaml"},
 	}
 
 	for _, test := range tests {

@@ -39,10 +39,6 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 }
 
 func checkAndMaybeInstall(ctx context.Context, path string, settings config.Config, install, restartAgent bool) (bool, error) {
-	if install && runtime.GOOS == "darwin" && os.Getenv("DB_AGENT_SERVICE_NAME") != "" {
-		return false, errors.New("signed updates cannot restart a launchd service yet; stop the service and update manually")
-	}
-
 	client, err := newUpdateClient(settings)
 	if err != nil {
 		return false, err

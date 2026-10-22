@@ -31,7 +31,7 @@ var stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 var releaseTargets = []struct{ OS, Arch string }{
-	{"windows", "amd64"}, {"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "arm64"},
+	{"windows", "amd64"}, {"linux", "amd64"}, {"linux", "arm64"},
 }
 
 type releaseMetadata struct {

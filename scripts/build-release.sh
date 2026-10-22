@@ -20,7 +20,7 @@ if [[ -e "$release_output_dir" ]]; then
 fi
 mkdir -p "$release_output_dir"
 
-for target in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
+for target in windows/amd64 linux/amd64 linux/arm64; do
   target_os="${target%/*}"
   target_arch="${target#*/}"
   extension=""

@@ -18,7 +18,6 @@ build-all:
 	$(MAKE) build GOOS=windows GOARCH=amd64 OUTPUT="$(BUILD_DIR)/db-agent-windows-amd64.exe"
 	$(MAKE) build GOOS=linux GOARCH=amd64 OUTPUT="$(BUILD_DIR)/db-agent-linux-amd64"
 	$(MAKE) build GOOS=linux GOARCH=arm64 OUTPUT="$(BUILD_DIR)/db-agent-linux-arm64"
-	$(MAKE) build GOOS=darwin GOARCH=arm64 OUTPUT="$(BUILD_DIR)/db-agent-darwin-arm64"
 
 test:
 	$(GO) test ./...

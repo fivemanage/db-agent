@@ -85,7 +85,7 @@ func Control(svc Controller, action string) (string, error) {
 
 func controlError(action string, err error) error {
 	if errors.Is(err, os.ErrPermission) {
-		return fmt.Errorf("permission denied trying to %s the service; run an elevated Administrator terminal on Windows or use sudo on Linux/macOS: %w", action, err)
+		return fmt.Errorf("permission denied trying to %s the service; run an elevated Administrator terminal on Windows or use sudo on Linux: %w", action, err)
 	}
 	return fmt.Errorf("could not %s the service; check the OS service manager and Administrator/root permissions: %w", action, err)
 }

@@ -22,14 +22,14 @@ consistency limits, and real MySQL/MariaDB integration tests.
 
 ```sh
 make build      # current platform: bin/db-agent (bin/db-agent.exe on Windows)
-make build-all  # Windows amd64, Linux amd64/arm64, macOS arm64 binaries in bin/
+make build-all  # Windows amd64 and Linux amd64/arm64 binaries in bin/
 make check      # Go tests and vet
 ```
 
 Builds default to version `dev`; override it with `make build VERSION=0.1.0`.
 These are unsigned development builds. Tagged releases use the
 [release workflow](.github/workflows/release.yml) for builds, signing, provenance,
-and verification.
+and verification. Supported platforms are Windows amd64 and Linux amd64/arm64.
 `go run . <command>` compiles the current source
 automatically, so it does not require a separate build.
 
@@ -43,9 +43,8 @@ go build -o db-agent .
 
 On Windows use `db-agent.exe`. Setup and diagnostics should run as the intended
 service account (Administrator on Windows for the private config). The setup
-commands also run on Linux. The shared runtime supports Windows Service, Linux
-systemd, and macOS launchd; Linux distribution/installation validation remains
-DEV-508 work.
+commands also run on Linux. The shared runtime supports Windows Service and Linux
+systemd; Linux distribution/installation validation remains DEV-508 work.
 
 For the local dashboard, set `api_url: "http://localhost:3000"`, without `/api`
 or `/api/v1`. The agent appends `/api/v1/agent/...` and `/api/v1/backups/...` itself.
@@ -384,8 +383,8 @@ paste database passwords or recovery keys into chat or the dashboard.
 
 Place a built/released binary at its permanent location before installing; the
 service records its absolute executable path. Using `go run` to install would
-register a temporary build artifact. Windows uses LocalSystem; systemd and
-launchd use root. Config/key permissions must allow that account access, and
+register a temporary build artifact. Windows uses LocalSystem; systemd uses
+root. Config/key permissions must allow that account access, and
 database client utilities must be on the system/service PATH.
 
 For an already-enrolled agent, register and start without rerunning the wizard:
@@ -399,7 +398,7 @@ For an already-enrolled agent, register and start without rerunning the wizard:
 ```
 
 ```sh
-# Linux systemd or macOS launchd; use the permanent binary path
+# Linux systemd; use the permanent binary path
 sudo /opt/db-agent/db-agent install --service-only --config /etc/db-agent/config.yaml
 sudo /opt/db-agent/db-agent stop
 sudo /opt/db-agent/db-agent start
@@ -411,9 +410,9 @@ so heartbeat can report a classified setup error. It does not enroll, generate
 keys, or certify backup readiness. Normal `install` retains the setup wizard and
 prerequisite gate described above.
 
-The service name is `db-agent`. Installation uses automatic startup on Windows,
-enables the systemd unit for reboot, and sets launchd `RunAtLoad`. Install/start/
-stop/uninstall are safe to repeat; reinstalling does not change an existing
+The service name is `db-agent`. Installation uses automatic startup on Windows
+and enables the systemd unit for reboot. Install/start/stop/uninstall are safe to
+repeat; reinstalling does not change an existing
 service's executable/config binding. Uninstall and reinstall explicitly to change
 those paths. `--config` (or `DB_AGENT_CONFIG`) is resolved to an absolute path at
 install time; the installing shell's environment is not required after reboot.
@@ -434,13 +433,11 @@ work even if local config is missing or damaged. Permission/state failures retur
 actionable errors; failed systemd units remain startable/removable, while a
 Windows service still stopping is not reported as safely stopped.
 
-Runtime output goes to Windows Event Viewer (source `db-agent`), the systemd
-journal (`journalctl -u db-agent`), or launchd's `db-agent.out.log`/`db-agent.err.log`
-under `/var/log`. Local rotating-file logging is not implemented yet.
+Runtime output goes to Windows Event Viewer (source `db-agent`) or the systemd
+journal (`journalctl -u db-agent`). Local rotating-file logging is not implemented yet.
 Signed update service handoff uses the installed service name on Windows/systemd.
-Launchd automatic updates are disabled until its restart helper exists; stop the
-service and update its binary manually. Live reboot/stop/update validation on the
-target OS is still required; unit tests use fake service managers.
+Live reboot/stop/update validation on the target OS is still required; unit tests
+use fake service managers.
 
 ### Control-plane client (DEV-490)
 

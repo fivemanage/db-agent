@@ -19,11 +19,19 @@ func TestConfigUsesStablePathsAndAutomaticSystemService(t *testing.T) {
 	if cfg.Name != Name || cfg.EnvVars["DB_AGENT_SERVICE_NAME"] != Name || cfg.Option["UserService"] != false {
 		t.Fatal("unstable service identity or per-user installation")
 	}
-	if cfg.Option["StartType"] != "automatic" || cfg.Option["RunAtLoad"] != true {
+	if cfg.Option["StartType"] != "automatic" {
 		t.Fatal("service will not start after reboot")
 	}
 	if len(cfg.EnvVars) != 1 {
 		t.Fatal("installation environment contains more than service identity")
+	}
+}
+
+func TestConfigRejectsUnsupportedPlatforms(t *testing.T) {
+	for _, goos := range []string{"darwin", "freebsd"} {
+		if _, err := configFor("db-agent", "config.yaml", goos); err == nil {
+			t.Fatalf("unsupported service platform accepted: %q", goos)
+		}
 	}
 }
 
