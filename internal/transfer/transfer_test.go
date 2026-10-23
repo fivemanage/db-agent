@@ -739,7 +739,9 @@ func TestStorageCooldownSurvivesSessionAndRestart(t *testing.T) {
 	defer storage.Close()
 
 	p := &fakePlane{url: storage.URL}
-	u := testUploader(t, p, storage, Options{SessionTimeout: 50 * time.Millisecond})
+	// Allow private state writes and the TLS exchange to finish on Windows before
+	// the session expires while waiting out the one-hour storage cooldown.
+	u := testUploader(t, p, storage, Options{SessionTimeout: 5 * time.Second})
 
 	if err := u.Run(context.Background(), io.NopCloser(strings.NewReader("backup")), testKey(t), artifact.Zstd, nil); !errors.Is(err, ErrPending) {
 		t.Fatal(err)

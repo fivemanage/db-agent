@@ -19,10 +19,11 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv("DB_AGENT_BACKUP_PROCESS_HELPER") == "1" {
 		data := make([]byte, 64<<10)
-		if _, err := rand.Read(data); err != nil {
-			os.Exit(2)
-		}
 		for {
+			// Repeated blocks compress too well to reliably reach the spool limit.
+			if _, err := rand.Read(data); err != nil {
+				os.Exit(2)
+			}
 			if _, err := os.Stdout.Write(data); err != nil {
 				os.Exit(2)
 			}
