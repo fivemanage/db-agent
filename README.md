@@ -215,6 +215,9 @@ Release builds check for signed updates at startup and every 24 hours when
 replacement, with rollback if restart fails. Development builds skip automatic
 checks.
 
+Stable installations accept only stable updates. Prerelease builds use a separate
+test channel and should run on isolated test systems, not production servers.
+
 ## Build and development
 
 ```sh

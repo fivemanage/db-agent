@@ -16,9 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fivemanage/db-agent/internal/releaseversion"
 )
 
 const (
@@ -297,48 +298,20 @@ func requireHTTPS(raw string) error {
 }
 
 func compareVersions(a, b string) (int, error) {
-	left, err := parseVersion(a)
+	left, err := releaseversion.Parse(a)
 	if err != nil {
 		return 0, fmt.Errorf("update version: %w", err)
 	}
 
-	right, err := parseVersion(b)
+	right, err := releaseversion.Parse(b)
 	if err != nil {
 		return 0, fmt.Errorf("installed version: %w", err)
 	}
 
-	for i := range left {
-		if left[i] > right[i] {
-			return 1, nil
-		}
-		if left[i] < right[i] {
-			return -1, nil
-		}
+	// Signature trust alone must not turn a stable installation into a staging
+	// installation (or vice versa), even if an operator reuses a signing key.
+	if left.Channel() != right.Channel() {
+		return 0, errors.New("update channel differs from the installed release; install the intended channel explicitly")
 	}
-
-	return 0, nil
-}
-
-func parseVersion(value string) ([3]uint64, error) {
-	var parts [3]uint64
-	value = strings.TrimPrefix(value, "v")
-	fields := strings.Split(value, ".")
-	if len(fields) != 3 {
-		return parts, errors.New("expected a stable major.minor.patch version")
-	}
-
-	for i, field := range fields {
-		if field == "" || (len(field) > 1 && field[0] == '0') {
-			return parts, errors.New("invalid version component")
-		}
-
-		n, err := strconv.ParseUint(field, 10, 64)
-		if err != nil {
-			return parts, errors.New("invalid version component")
-		}
-
-		parts[i] = n
-	}
-
-	return parts, nil
+	return left.Compare(right), nil
 }

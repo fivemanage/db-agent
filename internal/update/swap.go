@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fivemanage/db-agent/internal/operation"
+	"github.com/fivemanage/db-agent/internal/releaseversion"
 )
 
 type Restart struct {
@@ -189,7 +190,7 @@ func waitForOperations(dir string, budget time.Duration) (func(), error) {
 }
 
 func verifyInstalledVersion(target, expected string) error {
-	if _, err := parseVersion(expected); err != nil {
+	if _, err := releaseversion.Parse(expected); err != nil {
 		return err
 	}
 	command := exec.Command(target, "version")

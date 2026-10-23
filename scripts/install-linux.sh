@@ -8,6 +8,7 @@ umask 077
 # Provisioned by release-manifest render-installer, not by the customer or feed.
 release_public_key=''
 release_base_url=''
+release_channel='stable'
 work=''
 
 die() { printf 'Installation stopped: %s\n' "$1" >&2; exit 1; }
@@ -62,6 +63,7 @@ main() {
   fi
   [ -n "$release_public_key" ] && [ -n "$release_base_url" ] \
     || die "Release hosting/signing trust is not provisioned; obtain the published FiveManage installer."
+  case "$release_channel" in stable|staging) ;; *) die "Invalid installer release channel." ;; esac
   release_base_url="${release_base_url%/}"
   case "$release_base_url" in
     https://?*) ;;
@@ -111,8 +113,8 @@ main() {
 
   # Parse filenames only after authenticating the existing release inventory.
   # One exact target match also prevents path traversal or ambiguous selection.
-  record="$(awk -v arch="$arch" '
-    BEGIN { n="(0|[1-9][0-9]*)"; target="^db-agent-" n "[.]" n "[.]" n "-linux-" arch "$" }
+  record="$(awk -v arch="$arch" -v channel="$release_channel" '
+    BEGIN { n="(0|[1-9][0-9]*)"; suffix=(channel == "staging" ? "-rc[.]" n : ""); target="^db-agent-" n "[.]" n "[.]" n suffix "-linux-" arch "$" }
     $2 ~ target {
       count++
       if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || substr($0,65,2) != "  ") invalid=1

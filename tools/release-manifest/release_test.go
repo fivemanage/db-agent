@@ -21,7 +21,14 @@ func TestReleaseInputValidation(t *testing.T) {
 	if err := validateBuild(base); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []string{"", "dev", "v1.2.3", "01.2.3", "1.2.3-rc.1", "0.0.0", "18446744073709551616.0.0", "1.2.3 -X secret=value"} {
+	for _, value := range []string{"1.2.3", "1.2.3-rc.1", "1.2.3-rc.10"} {
+		m := base
+		m.Version = value
+		if err := validateBuild(m); err != nil {
+			t.Fatalf("rejected supported release %s: %v", value, err)
+		}
+	}
+	for _, version := range []string{"", "dev", "v1.2.3", "01.2.3", "1.2.3-rc.01", "1.2.3-beta.1", "0.0.0", "0.0.0-rc.1", "18446744073709551616.0.0", "1.2.3 -X secret=value"} {
 		m := base
 		m.Version = version
 		if err := validateBuild(m); err == nil {
@@ -125,6 +132,12 @@ func TestMalformedSigningKeyRejected(t *testing.T) {
 }
 
 func TestSealReleaseRoundTrip(t *testing.T) {
+	for _, version := range []string{"1.2.3", "1.2.3-rc.2"} {
+		t.Run(version, func(t *testing.T) { testSealReleaseRoundTrip(t, version) })
+	}
+}
+
+func testSealReleaseRoundTrip(t *testing.T, version string) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +160,7 @@ func TestSealReleaseRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range releaseTargets {
-		path := filepath.Join(dir, artifactName("1.2.3", target.OS, target.Arch))
+		path := filepath.Join(dir, artifactName(version, target.OS, target.Arch))
 		command := exec.Command("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-o", path, ".")
 		command.Dir = source
 		command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS="+target.OS, "GOARCH="+target.Arch, "GOWORK=off", "GOFLAGS=")
@@ -162,17 +175,37 @@ func TestSealReleaseRoundTrip(t *testing.T) {
 	if err := os.WriteFile(privatePath, []byte(base64.StdEncoding.EncodeToString(private)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"seal", "--dir", dir, "--private", privatePath, "--version", "1.2.3", "--public-key", base64.StdEncoding.EncodeToString(public), "--api-url", "https://api.example.com", "--commit", strings.Repeat("a", 40), "--base-url", "https://releases.example.com/1.2.3"}
+	args := []string{"seal", "--dir", dir, "--private", privatePath, "--version", version, "--public-key", base64.StdEncoding.EncodeToString(public), "--api-url", "https://api.example.com", "--commit", strings.Repeat("a", 40), "--base-url", "https://releases.example.com/" + version, "--installer-dir", filepath.Join("..", "..", "scripts")}
 	if err := run(args); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"verify-release", "--dir", dir, "--public-key", base64.StdEncoding.EncodeToString(public)}); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"database.sh", "database.ps1"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || !strings.Contains(string(data), "1.2.3") && name == "database.ps1" {
+			t.Fatalf("missing provisioned %s: %v", name, err)
+		}
+	}
+	installerPath := filepath.Join(dir, "database.sh")
+	original, err := os.ReadFile(installerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installerPath, append(original, []byte("# tampered\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRelease(dir, public); err == nil {
+		t.Fatal("installer tampering was not covered by the signed inventory")
+	}
+	if err := os.WriteFile(installerPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := run(args); err == nil {
 		t.Fatal("signing overwrote existing release metadata")
 	}
-	if err := os.Remove(filepath.Join(dir, artifactName("1.2.3", "windows", "amd64"))); err != nil {
+	if err := os.Remove(filepath.Join(dir, artifactName(version, "windows", "amd64"))); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyRelease(dir, public); err == nil {

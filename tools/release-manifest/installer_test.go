@@ -16,7 +16,7 @@ func TestRenderInstallerPinsPublicTrustWithoutPrivateMaterial(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.sh")
 	output := filepath.Join(dir, "database.sh")
-	if err := os.WriteFile(source, []byte("release_public_key=''\nrelease_base_url=''\n"), 0600); err != nil {
+	if err := os.WriteFile(source, []byte("release_public_key=''\nrelease_base_url=''\nrelease_channel='stable'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
@@ -50,12 +50,15 @@ func TestWindowsInstallerPinsOnlyVerifiedManifestValues(t *testing.T) {
 	}
 	manifest := update.Manifest{Version: "1.2.3", OS: "windows", Arch: "amd64", URL: "https://github.com/fivemanage/db-agent/releases/download/v1.2.3/db-agent-1.2.3-windows-amd64.exe", SHA256: strings.Repeat("a", 64)}
 	manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, manifest.Payload()))
-	for _, name := range []string{"valid", "tampered checksum", "wrong platform", "wrong key"} {
+	for _, name := range []string{"valid", "staging", "staging without opt in", "tampered checksum", "wrong platform", "wrong key"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			value := manifest
 			key := public
 			switch name {
+			case "staging", "staging without opt in":
+				value.Version = "1.2.3-rc.1"
+				value.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, value.Payload()))
 			case "tampered checksum":
 				value.SHA256 = strings.Repeat("b", 64)
 			case "wrong platform":
@@ -72,8 +75,12 @@ func TestWindowsInstallerPinsOnlyVerifiedManifestValues(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := filepath.Join(dir, "database.ps1")
-			err := run([]string{"render-installer", "--platform", "windows", "--source", filepath.Join("..", "..", "scripts", "install-windows.ps1"), "--manifest", manifestPath, "--public-key", base64.StdEncoding.EncodeToString(key), "--output", output})
-			if name != "valid" {
+			args := []string{"render-installer", "--platform", "windows", "--source", filepath.Join("..", "..", "scripts", "install-windows.ps1"), "--manifest", manifestPath, "--public-key", base64.StdEncoding.EncodeToString(key), "--output", output}
+			if name == "staging" {
+				args = append(args, "--channel", "staging")
+			}
+			err := run(args)
+			if name != "valid" && name != "staging" {
 				if err == nil {
 					t.Fatal("rendered an unverified Windows installer")
 				}

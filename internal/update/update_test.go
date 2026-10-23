@@ -54,6 +54,36 @@ func TestManifestVerification(t *testing.T) {
 	}
 }
 
+func TestStagingOrderingAndChannelIsolation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		current, next string
+		newer, reject bool
+	}{
+		{"1.2.3-rc.1", "1.2.3-rc.2", true, false},
+		{"1.2.3-rc.2", "1.2.3-rc.10", true, false},
+		{"1.2.3-rc.10", "1.2.3-rc.2", false, false},
+		{"1.2.3-rc.2", "1.2.3-rc.2", false, false},
+		{"1.2.3", "1.2.4-rc.1", false, true},
+		{"1.2.3-rc.1", "1.2.3", false, true},
+	} {
+		manifest := sign(t, Manifest{Version: test.next, OS: "linux", Arch: "amd64", URL: "https://example.com/artifact", SHA256: strings.Repeat("a", 64)}, private)
+		newer, err := manifest.Verify(public, test.current, "linux", "amd64")
+		if (err != nil) != test.reject || err == nil && newer != test.newer {
+			t.Errorf("%s -> %s: newer=%v, error=%v", test.current, test.next, newer, err)
+		}
+		if test.reject {
+			client := Client{PublicKey: public, Version: test.current, OS: "linux", Arch: "amd64"}
+			if _, err := client.Stage(context.Background(), manifest, filepath.Join(t.TempDir(), "agent")); err == nil {
+				t.Fatal("cross-channel staging bypassed manifest policy")
+			}
+		}
+	}
+}
+
 func TestCheckAndStageVerifiedArtifact(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

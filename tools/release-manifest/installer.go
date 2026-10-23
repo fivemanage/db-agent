@@ -14,6 +14,7 @@ import (
 func renderInstaller(args []string) error {
 	flags := flag.NewFlagSet("render-installer", flag.ContinueOnError)
 	platform := flags.String("platform", "linux", "installer platform: linux or windows")
+	channel := flags.String("channel", "stable", "installer channel: stable or staging")
 	source := flags.String("source", "", "unprovisioned installer template")
 	output := flags.String("output", "", "new public installer output path")
 	publicKey := flags.String("public-key", "", "independently trusted release public key")
@@ -24,6 +25,9 @@ func renderInstaller(args []string) error {
 	}
 	if *output == "" || flags.NArg() != 0 {
 		return errors.New("render-installer requires --output, --public-key, and --base-url")
+	}
+	if *channel != "stable" && *channel != "staging" {
+		return errors.New("installer channel must be stable or staging")
 	}
 	key, err := update.PublicKey(*publicKey)
 	if err != nil {
@@ -38,6 +42,7 @@ func renderInstaller(args []string) error {
 		}
 		values["release_public_key"] = base64.StdEncoding.EncodeToString(key)
 		values["release_base_url"] = *baseURL
+		values["release_channel"] = *channel
 		if *source == "" {
 			*source = "scripts/install-linux.sh"
 		}
@@ -49,12 +54,16 @@ func renderInstaller(args []string) error {
 		if err := readJSON(*manifestPath, &manifest); err != nil {
 			return fmt.Errorf("read signed Windows manifest: %w", err)
 		}
-		newer, err := manifest.Verify(key, "0.0.0", "windows", "amd64")
+		version, err := canonicalReleaseVersion(manifest.Version)
+		if err != nil {
+			return err
+		}
+		newer, err := manifest.Verify(key, version.Floor(), "windows", "amd64")
 		if err != nil {
 			return fmt.Errorf("verify Windows installer release: %w", err)
 		}
-		if !newer || !stableVersion.MatchString(manifest.Version) {
-			return errors.New("Windows installer requires a nonzero canonical stable release version")
+		if !newer || version.Channel() != *channel {
+			return errors.New("Windows installer release does not match the requested channel")
 		}
 		if err := publicURL(manifest.URL); err != nil {
 			return fmt.Errorf("Windows artifact URL: %w", err)
@@ -76,6 +85,9 @@ func renderInstaller(args []string) error {
 	text := string(contents)
 	for name, value := range values {
 		placeholder := name + "=''"
+		if name == "release_channel" {
+			placeholder = "release_channel='stable'"
+		}
 		if *platform == "windows" {
 			placeholder = name + " = ''"
 		}

@@ -28,13 +28,13 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer|channel [flags]")
 	}
 
 	switch args[0] {
 	case "render-installer":
 		return renderInstaller(args[1:])
-	case "validate", "seal", "verify-release":
+	case "validate", "seal", "verify-release", "channel":
 		return runRelease(args)
 	case "keygen":
 		flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
@@ -89,7 +89,7 @@ func run(args []string) error {
 		flags := flag.NewFlagSet("sign", flag.ContinueOnError)
 		privatePath := flags.String("private", "", "private key file")
 		artifact := flags.String("artifact", "", "release executable")
-		version := flags.String("version", "", "stable major.minor.patch version")
+		version := flags.String("version", "", "major.minor.patch or staging major.minor.patch-rc.N version")
 		goos := flags.String("os", "", "target operating system")
 		goarch := flags.String("arch", "", "target architecture")
 		artifactURL := flags.String("url", "", "HTTPS artifact URL")
@@ -99,6 +99,10 @@ func run(args []string) error {
 		}
 		if *privatePath == "" || *artifact == "" || *version == "" || *goos == "" || *goarch == "" || *artifactURL == "" || *output == "" || flags.NArg() != 0 {
 			return errors.New("sign requires --private, --artifact, --version, --os, --arch, --url, and --output")
+		}
+		parsedVersion, err := canonicalReleaseVersion(*version)
+		if err != nil {
+			return err
 		}
 
 		private, err := readPrivateKey(*privatePath)
@@ -119,7 +123,7 @@ func run(args []string) error {
 
 		manifest := update.Manifest{Version: *version, OS: *goos, Arch: *goarch, URL: *artifactURL, SHA256: hex.EncodeToString(hash.Sum(nil))}
 		manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, manifest.Payload()))
-		if _, err := manifest.Verify(private.Public().(ed25519.PublicKey), "0.0.0", *goos, *goarch); err != nil {
+		if _, err := manifest.Verify(private.Public().(ed25519.PublicKey), parsedVersion.Floor(), *goos, *goarch); err != nil {
 			return err
 		}
 
@@ -137,7 +141,7 @@ func run(args []string) error {
 
 		return outputFile.Close()
 	default:
-		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer|channel [flags]")
 	}
 }
 

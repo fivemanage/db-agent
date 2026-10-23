@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fivemanage/db-agent/internal/operation"
+	"github.com/fivemanage/db-agent/internal/releaseversion"
 	"github.com/fivemanage/db-agent/internal/securefile"
 	"github.com/fivemanage/db-agent/internal/update"
 )
@@ -79,11 +80,16 @@ func TestReleaseArtifact(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	parsedVersion, err := releaseversion.Parse(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineVersion := parsedVersion.Floor()
 	key, err := update.PublicKey(publicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newer, err := manifest.Verify(key, "0.0.0", runtime.GOOS, runtime.GOARCH); err != nil || !newer || manifest.Version != version {
+	if newer, err := manifest.Verify(key, baselineVersion, runtime.GOOS, runtime.GOARCH); err != nil || !newer || manifest.Version != version {
 		t.Fatalf("release manifest: newer=%v, %v", newer, err)
 	}
 
@@ -103,14 +109,14 @@ func TestReleaseArtifact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-X github.com/fivemanage/db-agent/cmd.version=0.0.0", "-o", installed, ".")
+		build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-X github.com/fivemanage/db-agent/cmd.version="+baselineVersion, "-o", installed, ".")
 		build.Dir = filepath.Dir(strings.TrimSpace(string(modulePath)))
 		build.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if output, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build baseline: %v\n%s", err, output)
 		}
 	}
-	run(t, installed, "version", "0.0.0")
+	run(t, installed, "version", baselineVersion)
 	baseline, err := os.ReadFile(installed)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +127,7 @@ func TestReleaseArtifact(t *testing.T) {
 
 	// Keep signed public URLs intact. Only the test's transport substitutes local
 	// bytes; production HTTP and trust policy are not weakened for CI.
-	client := update.Client{PublicKey: key, Version: "0.0.0", HTTP: &http.Client{Transport: artifactTransport{path: artifact, url: manifest.URL}}}
+	client := update.Client{PublicKey: key, Version: baselineVersion, HTTP: &http.Client{Transport: artifactTransport{path: artifact, url: manifest.URL}}}
 	staged, err := client.Stage(context.Background(), manifest, installed)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +187,7 @@ func TestReleaseArtifact(t *testing.T) {
 			assertNoService(t)
 		})
 		run(t, installed, "install", "", "--service-only", "--config", configPath)
-		waitHeartbeat(t, heartbeats, "0.0.0")
+		waitHeartbeat(t, heartbeats, baselineVersion)
 		if runtime.GOOS == "linux" {
 			assertLinuxUnit(t)
 			if err := update.LaunchHelper(installed, staged, manifest.SHA256, version, update.Restart{ServiceName: "db-agent", ConfigPath: configPath}); err != nil {

@@ -181,6 +181,28 @@ fi
         self.sign()
         self.assert_rejected(self.run_installer(), "missing or ambiguous")
 
+    def test_stable_installer_rejects_a_signed_staging_release(self):
+        self.artifact = self.artifact.replace(b"1.2.3", b"1.2.3-rc.2")
+        type(self).artifact_name = self.artifact_name.replace("1.2.3", "1.2.3-rc.2")
+        self.inventory = "%s  %s\n" % (hashlib.sha256(self.artifact).hexdigest(), self.artifact_name)
+        self.sign()
+        self.assert_rejected(self.run_installer(), "missing or ambiguous")
+
+    def test_staging_installer_accepts_candidate_versions_only(self):
+        replacement = pathlib.Path("/usr/local/bin/staging-installer.sh")
+        replacement.write_text(pathlib.Path(INSTALLER).read_text().replace("release_channel='stable'", "release_channel='staging'"))
+        try:
+            self.assert_rejected(self.run_installer(script=str(replacement)), "missing or ambiguous")
+            self.artifact = self.artifact.replace(b"1.2.3", b"1.2.3-rc.2")
+            type(self).artifact_name = self.artifact_name.replace("1.2.3", "1.2.3-rc.2")
+            self.inventory = "%s  %s\n" % (hashlib.sha256(self.artifact).hexdigest(), self.artifact_name)
+            self.sign()
+            result = self.run_installer(script=str(replacement))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(EXECUTABLE.read_bytes(), self.artifact)
+        finally:
+            replacement.unlink()
+
     def test_duplicate_platform_record_is_rejected(self):
         self.inventory += self.inventory
         self.sign()

@@ -19,15 +19,14 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
-	"strconv"
 	"strings"
 
+	"github.com/fivemanage/db-agent/internal/releaseversion"
 	"github.com/fivemanage/db-agent/internal/update"
 )
 
 const checksumDomain = "fivemanage-db-agent-checksums-v1\n"
 
-var stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 var releaseTargets = []struct{ OS, Arch string }{
@@ -47,10 +46,11 @@ func runRelease(args []string) error {
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	dir := flags.String("dir", "", "release directory")
 	private := flags.String("private", "", "private key file (seal only)")
+	installerDir := flags.String("installer-dir", "scripts", "installer source directory (seal only)")
 	m := releaseMetadata{}
-	flags.StringVar(&m.Version, "version", "", "stable version without v prefix")
+	flags.StringVar(&m.Version, "version", "", "release version without v prefix; staging uses -rc.N")
 	flags.StringVar(&m.PublicKey, "public-key", "", "trusted base64 public key")
-	flags.StringVar(&m.APIURL, "api-url", "", "public production API base URL")
+	flags.StringVar(&m.APIURL, "api-url", "", "public channel-specific API base URL")
 	flags.StringVar(&m.BaseURL, "base-url", "", "public immutable release directory URL")
 	flags.StringVar(&m.Commit, "commit", "", "source commit SHA")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -65,6 +65,14 @@ func runRelease(args []string) error {
 			return err
 		}
 		return verifyRelease(*dir, key)
+	}
+	if args[0] == "channel" {
+		version, err := canonicalReleaseVersion(m.Version)
+		if err != nil {
+			return err
+		}
+		fmt.Println(version.Channel())
+		return nil
 	}
 	if err := validateBuild(m); err != nil {
 		return err
@@ -85,23 +93,33 @@ func runRelease(args []string) error {
 	if base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)) != m.PublicKey {
 		return errors.New("public key does not match release signing key")
 	}
-	return sealRelease(*dir, m, key)
+	return sealRelease(*dir, m, key, *installerDir)
+}
+
+func canonicalReleaseVersion(value string) (releaseversion.Version, error) {
+	version, err := releaseversion.Parse(value)
+	if err != nil {
+		return version, err
+	}
+	if strings.HasPrefix(value, "v") || version.IsZero() {
+		return version, errors.New("release version must be nonzero major.minor.patch or major.minor.patch-rc.N, without v prefix")
+	}
+	return version, nil
 }
 
 func validateBuild(m releaseMetadata) error {
-	if !stableVersion.MatchString(m.Version) || m.Version == "0.0.0" {
-		return errors.New("release version must be a nonzero stable major.minor.patch without v prefix")
-	}
-	for _, field := range strings.Split(m.Version, ".") {
-		if _, err := strconv.ParseUint(field, 10, 64); err != nil {
-			return errors.New("release version component exceeds the updater's supported range")
-		}
-	}
-	if _, err := update.PublicKey(m.PublicKey); err != nil {
+	if _, err := canonicalReleaseVersion(m.Version); err != nil {
 		return err
 	}
+	key, err := update.PublicKey(m.PublicKey)
+	if err != nil {
+		return err
+	}
+	if base64.StdEncoding.EncodeToString(key) != m.PublicKey {
+		return errors.New("release public key must use canonical single-line base64")
+	}
 	if err := publicURL(m.APIURL); err != nil {
-		return fmt.Errorf("production API URL: %w", err)
+		return fmt.Errorf("release API URL: %w", err)
 	}
 	return nil
 }
@@ -140,8 +158,12 @@ func releaseFiles(version string) []string {
 	return names
 }
 
-func sealRelease(dir string, m releaseMetadata, key ed25519.PrivateKey) error {
+func sealRelease(dir string, m releaseMetadata, key ed25519.PrivateKey, installerDir string) error {
 	if err := inspectArtifacts(dir, &m); err != nil {
+		return err
+	}
+	version, err := canonicalReleaseVersion(m.Version)
+	if err != nil {
 		return err
 	}
 	for _, target := range releaseTargets {
@@ -152,17 +174,27 @@ func sealRelease(dir string, m releaseMetadata, key ed25519.PrivateKey) error {
 		}
 		manifest := update.Manifest{Version: m.Version, OS: target.OS, Arch: target.Arch, URL: m.BaseURL + "/" + name, SHA256: digest}
 		manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(key, manifest.Payload()))
-		if _, err := manifest.Verify(key.Public().(ed25519.PublicKey), "0.0.0", target.OS, target.Arch); err != nil {
+		if _, err := manifest.Verify(key.Public().(ed25519.PublicKey), version.Floor(), target.OS, target.Arch); err != nil {
 			return err
 		}
 		if err := writeJSON(filepath.Join(dir, target.OS+"-"+target.Arch+".json"), manifest); err != nil {
 			return err
 		}
 	}
+	if err := renderInstaller([]string{"--platform", "linux", "--source", filepath.Join(installerDir, "install-linux.sh"), "--channel", version.Channel(), "--public-key", m.PublicKey, "--base-url", m.BaseURL, "--output", filepath.Join(dir, "database.sh")}); err != nil {
+		return fmt.Errorf("render release Linux installer: %w", err)
+	}
+	if err := renderInstaller([]string{"--platform", "windows", "--source", filepath.Join(installerDir, "install-windows.ps1"), "--channel", version.Channel(), "--public-key", m.PublicKey, "--manifest", filepath.Join(dir, "windows-amd64.json"), "--output", filepath.Join(dir, "database.ps1")}); err != nil {
+		return fmt.Errorf("render release Windows installer: %w", err)
+	}
 	if err := writeJSON(filepath.Join(dir, "version.json"), m); err != nil {
 		return err
 	}
-	sums, err := checksums(dir, releaseFiles(m.Version))
+	names, err := releaseInventory(dir, m.Version)
+	if err != nil {
+		return err
+	}
+	sums, err := checksums(dir, names)
 	if err != nil {
 		return err
 	}
@@ -215,7 +247,7 @@ func verifyRelease(dir string, key ed25519.PublicKey) error {
 	if err := validateBuild(m); err != nil {
 		return err
 	}
-	allowed := append(releaseFiles(m.Version), "SHA256SUMS", "SHA256SUMS.sig", "provenance.sigstore.json")
+	allowed := append(releaseFiles(m.Version), "SHA256SUMS", "SHA256SUMS.sig", "provenance.sigstore.json", "database.sh", "database.ps1")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -235,7 +267,11 @@ func verifyRelease(dir string, key ed25519.PublicKey) error {
 	if err := publicURL(m.BaseURL); err != nil {
 		return err
 	}
-	expected, err := checksums(dir, releaseFiles(m.Version))
+	names, err := releaseInventory(dir, m.Version)
+	if err != nil {
+		return err
+	}
+	expected, err := checksums(dir, names)
 	if err != nil {
 		return err
 	}
@@ -247,7 +283,11 @@ func verifyRelease(dir string, key ed25519.PublicKey) error {
 		if err := readJSON(filepath.Join(dir, target.OS+"-"+target.Arch+".json"), &manifest); err != nil {
 			return err
 		}
-		if _, err := manifest.Verify(key, "0.0.0", target.OS, target.Arch); err != nil {
+		version, err := canonicalReleaseVersion(m.Version)
+		if err != nil {
+			return err
+		}
+		if _, err := manifest.Verify(key, version.Floor(), target.OS, target.Arch); err != nil {
 			return err
 		}
 		name := artifactName(m.Version, target.OS, target.Arch)
@@ -260,6 +300,21 @@ func verifyRelease(dir string, key ed25519.PublicKey) error {
 		}
 	}
 	return inspectArtifacts(dir, &m)
+}
+
+func releaseInventory(dir, version string) ([]string, error) {
+	names := releaseFiles(version)
+	// Older bundles predate generated installers. New installers, when present,
+	// must be covered by the signed inventory rather than merely allowed extras.
+	for _, name := range []string{"database.sh", "database.ps1"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			names = append(names, name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func inspectArtifacts(dir string, m *releaseMetadata) error {

@@ -12,19 +12,79 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  configuration-scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require environment-scoped release variables
+        env:
+          INHERITED_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+          INHERITED_API_URL: ${{ vars.DB_AGENT_API_URL }}
+        shell: bash
+        run: |
+          if [[ -n "$INHERITED_PUBLIC_KEY" || -n "$INHERITED_API_URL" ]]; then
+            echo 'Move DB_AGENT_RELEASE_PUBLIC_KEY and DB_AGENT_API_URL into the production/staging environments and remove repository/organization-level copies. This prevents fallback to production values.' >&2
+            exit 1
+          fi
+
+  settings:
+    needs: configuration-scope
+    runs-on: ubuntu-24.04
+    environment: ${{ contains(github.ref_name, '-rc.') && 'staging' || 'production' }}
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.select.outputs.channel }}
+      environment: ${{ steps.select.outputs.environment }}
+      public: ${{ steps.select.outputs.public }}
+      public_key: ${{ steps.select.outputs.public_key }}
+      api_url: ${{ steps.select.outputs.api_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Select isolated release channel and validate settings
+        id: select
+        env:
+          RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+          RELEASE_API_URL: ${{ vars.DB_AGENT_API_URL }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          channel="$(go run ./tools/release-manifest channel --version "$version")"
+          if [[ "$channel" == staging ]]; then
+            environment=staging
+          else
+            environment=production
+            if [[ "$REPOSITORY_VISIBILITY" != public ]]; then
+              echo 'Production downloads/provenance require a public repository.' >&2
+              exit 1
+            fi
+          fi
+          go run ./tools/release-manifest validate --version "$version" --public-key "$RELEASE_PUBLIC_KEY" --api-url "$RELEASE_API_URL"
+          public=false
+          if [[ "$REPOSITORY_VISIBILITY" == public ]]; then public=true; fi
+          printf 'channel=%s\nenvironment=%s\npublic=%s\npublic_key=%s\napi_url=%s\n' "$channel" "$environment" "$public" "$RELEASE_PUBLIC_KEY" "$RELEASE_API_URL" >> "$GITHUB_OUTPUT"
+
   checks:
+    needs: settings
     uses: ./.github/workflows/checks.yml
 
   build:
-    needs: checks
+    needs: [settings, checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       version: ${{ steps.version.outputs.version }}
       commit: ${{ steps.version.outputs.commit }}
     env:
-      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
-      RELEASE_API_URL: ${{ vars.DB_AGENT_API_URL }}
+      RELEASE_PUBLIC_KEY: ${{ needs.settings.outputs.public_key }}
+      RELEASE_API_URL: ${{ needs.settings.outputs.api_url }}
+      RELEASE_CHANNEL: ${{ needs.settings.outputs.channel }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -34,20 +94,16 @@ jobs:
         with:
           go-version-file: .go-version
           cache: false
-      - name: Validate public release and source
+      - name: Validate release version and source
         id: version
-        env:
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
         shell: bash
         run: |
-          if [[ "$REPOSITORY_VISIBILITY" != public ]]; then
-            echo 'Public downloads/provenance require a public repository; no release will be published.' >&2
-            exit 1
-          fi
           version="${GITHUB_REF_NAME#v}"
           go run ./tools/release-manifest validate --version "$version" --public-key "$RELEASE_PUBLIC_KEY" --api-url "$RELEASE_API_URL"
           commit="$(git rev-parse HEAD)"
-          git merge-base --is-ancestor "$commit" origin/master
+          if [[ "$RELEASE_CHANNEL" == stable ]]; then
+            git merge-base --is-ancestor "$commit" origin/master
+          fi
           printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
       - name: Build and compare independent output directories
         env:
@@ -76,15 +132,15 @@ jobs:
           retention-days: 7
 
   sign:
-    needs: build
+    needs: [settings, build]
     runs-on: ubuntu-24.04
-    environment: release-signing
+    environment: ${{ needs.settings.outputs.environment }}
     timeout-minutes: 10
     env:
       RELEASE_VERSION: ${{ needs.build.outputs.version }}
       RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
-      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
-      RELEASE_API_URL: ${{ vars.DB_AGENT_API_URL }}
+      RELEASE_PUBLIC_KEY: ${{ needs.settings.outputs.public_key }}
+      RELEASE_API_URL: ${{ needs.settings.outputs.api_url }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -121,7 +177,7 @@ jobs:
           retention-days: 7
 
   smoke:
-    needs: [build, sign]
+    needs: [settings, build, sign]
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +187,7 @@ jobs:
     env:
       DB_AGENT_RELEASE_DIR: dist
       DB_AGENT_RELEASE_VERSION: ${{ needs.build.outputs.version }}
-      DB_AGENT_RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      DB_AGENT_RELEASE_PUBLIC_KEY: ${{ needs.settings.outputs.public_key }}
       DB_AGENT_RELEASE_SERVICE_SMOKE: '1'
       CGO_ENABLED: '0'
     steps:
@@ -151,7 +207,7 @@ jobs:
         run: |
           go run ./tools/release-manifest verify-release --dir dist --public-key "$DB_AGENT_RELEASE_PUBLIC_KEY"
           if [[ "$RUNNER_OS" != Windows ]]; then
-            chmod +x dist/db-agent-*
+            chmod +x dist/db-agent-* dist/database.sh
           fi
       - name: Compile native smoke harness
         shell: bash
@@ -168,16 +224,18 @@ jobs:
           fi
 
   publish:
-    needs: [build, sign, smoke]
+    needs: [settings, build, sign, smoke]
     runs-on: ubuntu-24.04
-    environment: release-promotion
+    environment: ${{ needs.settings.outputs.environment }}
     timeout-minutes: 15
     permissions:
       contents: write
       id-token: write
       attestations: write
     env:
-      RELEASE_PUBLIC_KEY: ${{ vars.DB_AGENT_RELEASE_PUBLIC_KEY }}
+      RELEASE_PUBLIC_KEY: ${{ needs.settings.outputs.public_key }}
+      RELEASE_CHANNEL: ${{ needs.settings.outputs.channel }}
+      PUBLIC_RELEASE: ${{ needs.settings.outputs.public }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -194,6 +252,7 @@ jobs:
       - name: Verify candidate before provenance
         run: go run ./tools/release-manifest verify-release --dir dist --public-key "$RELEASE_PUBLIC_KEY"
       - name: Attest binaries, manifests, SBOM, and signed checksum inventory
+        if: needs.settings.outputs.public == 'true'
         id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
@@ -203,13 +262,26 @@ jobs:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         shell: bash
         run: |
-          cp "$PROVENANCE_BUNDLE" dist/provenance.sigstore.json
+          if [[ -n "$PROVENANCE_BUNDLE" ]]; then
+            cp "$PROVENANCE_BUNDLE" dist/provenance.sigstore.json
+          elif [[ "$RELEASE_CHANNEL" != staging || "$PUBLIC_RELEASE" == true ]]; then
+            echo 'Public/production publication requires Sigstore provenance.' >&2
+            exit 1
+          fi
+          prerelease=()
+          if [[ "$RELEASE_CHANNEL" == staging ]]; then prerelease=(--prerelease --latest=false); fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
+            --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes "${prerelease[@]}"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/downloaded"
           diff --recursive dist "$RUNNER_TEMP/downloaded"
           go run ./tools/release-manifest verify-release --dir "$RUNNER_TEMP/downloaded" --public-key "$RELEASE_PUBLIC_KEY"
-          for artifact in "$RUNNER_TEMP/downloaded"/db-agent-*; do
-            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded/provenance.sigstore.json"
-          done
-          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          if [[ -n "$PROVENANCE_BUNDLE" ]]; then
+            for artifact in "$RUNNER_TEMP/downloaded"/db-agent-*; do
+              gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded/provenance.sigstore.json"
+            done
+          fi
+          if [[ "$RELEASE_CHANNEL" == staging ]]; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
+          fi
