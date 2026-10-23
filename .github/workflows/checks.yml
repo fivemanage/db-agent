@@ -66,3 +66,41 @@ jobs:
           cache: false
       - name: Disposable MySQL and MariaDB backup/restore integration
         run: bash scripts/test-restore-proof.sh
+      - name: Linux bootstrap trust and permission fixtures
+        run: bash scripts/test-linux-installer.sh
+
+  windows-installer:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Install test-only PowerShell tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+      - name: Windows PowerShell 5.1 lint, failure paths, and native ACLs
+        shell: powershell
+        run: ./scripts/test-windows-installer.ps1
+      - name: Build the real native fixture artifact
+        env:
+          CGO_ENABLED: '0'
+        shell: powershell
+        run: go build -trimpath -buildvcs=false -ldflags "-X github.com/fivemanage/db-agent/cmd.version=1.2.3" -o "$env:RUNNER_TEMP/db-agent-installer-proof.exe" .
+      - name: Native HTTPS bootstrap, service startup, and preservation smoke
+        env:
+          CGO_ENABLED: '0'
+          DB_AGENT_WINDOWS_INSTALLER_SMOKE: '1'
+        shell: powershell
+        run: |
+          $env:DB_AGENT_WINDOWS_SMOKE_ARTIFACT = "$env:RUNNER_TEMP/db-agent-installer-proof.exe"
+          go test -tags windows_installer_smoke -count=1 -v -timeout=5m ./test/windowsinstaller

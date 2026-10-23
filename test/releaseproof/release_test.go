@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fivemanage/db-agent/internal/operation"
 	"github.com/fivemanage/db-agent/internal/securefile"
 	"github.com/fivemanage/db-agent/internal/update"
 )
@@ -88,16 +90,27 @@ func TestReleaseArtifact(t *testing.T) {
 	work := t.TempDir()
 	installed := filepath.Join(work, "db-agent"+extension)
 	helper := filepath.Join(work, "helper"+extension)
-	modulePath, err := exec.Command("go", "env", "GOMOD").Output()
-	if err != nil {
-		t.Fatal(err)
+	if baselinePath := os.Getenv("DB_AGENT_RELEASE_BASELINE"); baselinePath != "" {
+		baseline, err := os.ReadFile(baselinePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(installed, baseline, 0700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		modulePath, err := exec.Command("go", "env", "GOMOD").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-X github.com/fivemanage/db-agent/cmd.version=0.0.0", "-o", installed, ".")
+		build.Dir = filepath.Dir(strings.TrimSpace(string(modulePath)))
+		build.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build baseline: %v\n%s", err, output)
+		}
 	}
-	build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-X github.com/fivemanage/db-agent/cmd.version=0.0.0", "-o", installed, ".")
-	build.Dir = filepath.Dir(strings.TrimSpace(string(modulePath)))
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build baseline: %v\n%s", err, output)
-	}
+	run(t, installed, "version", "0.0.0")
 	baseline, err := os.ReadFile(installed)
 	if err != nil {
 		t.Fatal(err)
@@ -169,9 +182,18 @@ func TestReleaseArtifact(t *testing.T) {
 		})
 		run(t, installed, "install", "", "--service-only", "--config", configPath)
 		waitHeartbeat(t, heartbeats, "0.0.0")
-		args = append(args, "--service", "db-agent")
-		run(t, helper, args[0], "", args[1:]...)
-		waitHeartbeat(t, heartbeats, version)
+		if runtime.GOOS == "linux" {
+			assertLinuxUnit(t)
+			if err := update.LaunchHelper(installed, staged, manifest.SHA256, version, update.Restart{ServiceName: "db-agent", ConfigPath: configPath}); err != nil {
+				t.Fatal(err)
+			}
+			waitHeartbeat(t, heartbeats, version)
+			waitHelperUnlock(t, configPath)
+		} else {
+			args = append(args, "--service", "db-agent")
+			run(t, helper, args[0], "", args[1:]...)
+			waitHeartbeat(t, heartbeats, version)
+		}
 	} else {
 		t.Log("standalone replacement only; OS service smoke was not requested or is unsupported")
 		args = append(args, "--no-restart")
@@ -183,6 +205,39 @@ func TestReleaseArtifact(t *testing.T) {
 	if err != nil || string(rollback) != string(baseline) {
 		t.Fatalf("update did not retain the original rollback binary: %v", err)
 	}
+}
+
+func assertLinuxUnit(t *testing.T) {
+	t.Helper()
+	if output, err := exec.Command("systemctl", "is-enabled", "db-agent.service").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "enabled" {
+		t.Fatalf("service is not enabled for boot: %v, %s", err, output)
+	}
+	output, err := exec.Command("systemctl", "show", "db-agent.service", "--property=UMask,NoNewPrivileges,KillMode,User").CombinedOutput()
+	if err != nil {
+		t.Fatalf("inspect service security settings: %v, %s", err, output)
+	}
+	for _, expected := range []string{"UMask=0077", "NoNewPrivileges=yes", "KillMode=control-group", "User=root"} {
+		if !strings.Contains(string(output), expected+"\n") {
+			t.Fatalf("systemd did not apply %q: %s", expected, output)
+		}
+	}
+}
+
+func waitHelperUnlock(t *testing.T, configPath string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		unlock, err := operation.TryLock(filepath.Join(filepath.Dir(configPath), "backup-transfer"))
+		if err == nil {
+			unlock()
+			return
+		}
+		if !errors.Is(err, operation.ErrBusy) {
+			t.Fatalf("inspect update helper lock: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("systemd update helper did not finish and release the operation lock")
 }
 
 func foregroundHeartbeat(t *testing.T, installed, configPath string, reports <-chan string, version string) {

@@ -28,10 +28,12 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer [flags]")
 	}
 
 	switch args[0] {
+	case "render-installer":
+		return renderInstaller(args[1:])
 	case "validate", "seal", "verify-release":
 		return runRelease(args)
 	case "keygen":
@@ -135,7 +137,7 @@ func run(args []string) error {
 
 		return outputFile.Close()
 	default:
-		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release [flags]")
+		return errors.New("usage: release-manifest keygen|public-key|sign|validate|seal|verify-release|render-installer [flags]")
 	}
 }
 

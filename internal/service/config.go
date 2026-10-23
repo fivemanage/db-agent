@@ -66,6 +66,7 @@ func configFor(executable, path, goos string) (*manager.Config, error) {
 	}
 	if goos == "linux" {
 		cfg.Dependencies = []string{"Wants=network-online.target", "After=network-online.target"}
+		cfg.Option["SystemdScript"] = systemdScript
 	}
 	return cfg, nil
 }
