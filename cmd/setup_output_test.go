@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/spf13/cobra"
 )
 
@@ -23,30 +26,31 @@ func TestSetupOutputRemainsReadableWithoutColor(t *testing.T) {
 			var buffer bytes.Buffer
 			output := newSetupOutput(&buffer)
 
-			output.title("Database backup setup", "Enrollment -> Database -> Recovery key -> Checks -> Service")
-			output.step(2, 5, "Connect your database", "Credentials stay on this machine.")
-			output.section("Review connection")
-			output.detail("Password", "(hidden)")
-			output.status("OK", "Enrollment saved.")
-			output.status("WARN", "Save an offline recovery copy.")
-			output.status("FAIL", "Database connection needs attention.")
+			output.title("Database backup setup", "Credentials stay on this machine.")
+			output.step(2, 5, "Connect your database")
+			output.section("Dashboard restores")
+			output.detail("Server", "127.0.0.1:3306")
+			output.ok("Connected to FiveManage")
+			output.warn("Save an offline recovery copy.")
+			output.fail("Database connection needs attention.")
+			stop := output.spin("Testing the connection")
+			stop()
 
 			text := buffer.String()
 			if strings.Count(text, agentBanner) != 1 || strings.Index(text, agentBanner) > strings.Index(text, "Database backup setup") {
 				t.Fatal("setup must show one ASCII banner before its heading")
 			}
 			for _, want := range []string{
-				"Database backup setup\n=====================",
-				"[2/5] Connect your database", "Review connection",
-				"Password     (hidden)", "[OK] Enrollment saved.",
-				"[WARN] Save an offline recovery copy.", "[FAIL] Database connection needs attention.",
+				"Database backup setup\n", "[2/5] Connect your database", "Dashboard restores",
+				"Server     127.0.0.1:3306", "  + Connected to FiveManage",
+				"  ! Save an offline recovery copy.", "  x Database connection needs attention.",
 			} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing %q in setup output: %s", want, text)
 				}
 			}
-			if strings.ContainsAny(text, "\x1b\r") {
-				t.Fatal("plain setup output contains terminal control sequences")
+			if strings.ContainsAny(text, "\x1b\r") || strings.Contains(text, "Testing the connection") {
+				t.Fatal("plain setup output contains terminal control sequences or spinner frames")
 			}
 		})
 	}
@@ -62,10 +66,10 @@ func TestSetupOutputDoesNotColorRedirectedFiles(t *testing.T) {
 	}
 	t.Cleanup(func() { file.Close() })
 
-	newSetupOutput(file).status("OK", "Enrollment saved.")
+	newSetupOutput(file).ok("Enrollment saved.")
 
 	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "  [OK] Enrollment saved.\n" {
+	if err != nil || string(data) != "  + Enrollment saved.\n" {
 		t.Fatalf("redirected file output: %q, error: %v", data, err)
 	}
 }
@@ -74,16 +78,88 @@ func TestSetupColorAddsOnlyStyling(t *testing.T) {
 	var plain, colored bytes.Buffer
 	for _, output := range []setupOutput{{writer: &plain}, {writer: &colored, color: true}} {
 		output.title("Setup", "Your credentials stay local.")
-		output.step(4, 5, "Check prerequisites", "Checking before service installation...")
+		output.step(4, 5, "Check prerequisites")
 		output.section("Results")
-		for _, status := range []string{"OK", "INFO", "WARN", "PASS", "FAIL", "SKIP"} {
-			output.status(status, "A readable result.")
-		}
+		output.ok("A readable result.")
+		output.info("A readable result.")
+		output.warn("A readable result.")
+		output.fail("A readable result.")
+		output.note("A readable result.")
+		output.check(database.Check{Name: "Check", Skipped: true, Message: "A readable result."})
+		output.ask("Question", "Y/n")
 	}
 
 	style := regexp.MustCompile(`\x1b\[[0-9;]+m`)
 	if !strings.Contains(colored.String(), "\x1b[") || style.ReplaceAllString(colored.String(), "") != plain.String() {
 		t.Fatal("color changed setup content or introduced non-styling terminal controls")
+	}
+}
+
+func TestLiveStepShowsProgressBar(t *testing.T) {
+	var buffer bytes.Buffer
+	output := setupOutput{writer: &buffer, live: true, glyphs: &asciiGlyphs}
+
+	output.step(2, 4, "Connect your database")
+
+	if !strings.Contains(buffer.String(), "############............  2/4  Connect your database") {
+		t.Fatalf("step progress: %q", buffer.String())
+	}
+}
+
+func TestLiveSpinnerClearsItsLineWhenStopped(t *testing.T) {
+	var buffer lockedBuffer
+	output := setupOutput{writer: &buffer, live: true, glyphs: &asciiGlyphs}
+
+	stop := output.spin("Testing the connection")
+	stop()
+	stop()
+	output.ok("Connected")
+
+	text := buffer.String()
+	if !strings.Contains(text, "Testing the connection") || !strings.HasSuffix(text, "\r\x1b[2K  + Connected\n") {
+		t.Fatalf("spinner output: %q", text)
+	}
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func TestConfirmUsesDefaultOnlyForEmptyAnswer(t *testing.T) {
+	for _, test := range []struct {
+		input      string
+		defaultYes bool
+		want       bool
+	}{
+		{"\n", true, true}, {"\n", false, false}, {"n\n", true, false}, {"yes\n", false, true}, {"maybe\n", true, false},
+	} {
+		var output bytes.Buffer
+		got, err := confirm(bufio.NewReader(strings.NewReader(test.input)), &output, "Continue?", test.defaultYes)
+		if err != nil || got != test.want {
+			t.Fatalf("confirm(%q, %t) = %t, %v", test.input, test.defaultYes, got, err)
+		}
+	}
+	if _, err := confirm(bufio.NewReader(strings.NewReader("")), &bytes.Buffer{}, "Continue?", true); err == nil {
+		t.Fatal("ended input was treated as an answer")
+	}
+}
+
+func TestDisplayTextEscapesTerminalControls(t *testing.T) {
+	if displayText("game_db") != "game_db" || displayText("game\x1b[31m") != `"game\x1b[31m"` {
+		t.Fatal("display text did not keep plain names or escape control sequences")
 	}
 }
 

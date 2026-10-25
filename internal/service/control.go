@@ -47,9 +47,9 @@ func Control(svc Controller, action string) (string, error) {
 	switch action {
 	case "install":
 		if !missing {
-			return "Service already installed; existing service settings unchanged.", nil
+			return "Service already installed.", nil
 		}
-		operation, message = svc.Install, "Service installed and configured to start after reboot."
+		operation, message = svc.Install, "Service installed (starts automatically after reboot)."
 	case "start":
 		if missing {
 			return "", errors.New("service is not installed; run db-agent install --service-only with the enrolled config first")
@@ -57,7 +57,7 @@ func Control(svc Controller, action string) (string, error) {
 		if status == manager.StatusRunning {
 			return "Service already running.", nil
 		}
-		operation, message = svc.Start, "Service start requested. This does not confirm a completed backup."
+		operation, message = svc.Start, "Service is starting."
 	case "stop":
 		if missing {
 			return "Service not installed; nothing to stop.", nil

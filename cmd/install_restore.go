@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/fivemanage/db-agent/internal/config"
 	"github.com/fivemanage/db-agent/internal/database"
@@ -47,7 +46,6 @@ func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.
 		return err
 	}
 	view := newSetupOutput(output)
-	view.section("Dashboard restores (optional)")
 	verify := func(access config.RestoreConfig) error {
 		if err := access.ValidateFor(settings.Database); err != nil {
 			return err
@@ -55,23 +53,31 @@ func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.
 		return safeRestoreCheck(setup.check(ctx, settings.Database, access))
 	}
 	if settings.Restore.Authorized {
-		if err := verify(settings.Restore); err != nil {
+		stop := view.spin("Checking dashboard restore access")
+		err := verify(settings.Restore)
+		stop()
+		if err != nil {
 			return fmt.Errorf("existing restore authorization could not be verified: %w; settings are preserved; repair it with db-agent configure --restore-access", err)
 		}
-		view.status("OK", "Existing dashboard restore access verified and preserved.")
+		view.ok("Dashboard restores enabled")
 		return nil
 	}
-	view.status("INFO", "Dashboard restores use your local recovery key and import into a new isolated database, never over production.")
-	view.status("INFO", "A separate local restore account is required. Your backup account stays read-only; database credentials never leave this machine.")
-	enable, err := prompt(input, output, "Enable dashboard restores? [y/N]", "N")
+
+	view.section("Dashboard restores (optional)")
+	view.note("Restore backups from the dashboard into a new database. Your live database is never touched.")
+	view.note("This needs a separate restore user that can create databases and users; your backup user stays read-only.")
+	question := "Create a restore user?"
+	if settings.Restore.User != "" {
+		question = "Turn dashboard restores back on with your saved restore user?"
+	}
+	enable, err := confirm(input, output, question, false)
 	if err != nil {
 		return err
 	}
-	if !affirmative(enable) {
-		view.status("INFO", "Dashboard restores remain disabled. Backup-only setup will continue; rerun install to enable them later.")
+	if !enable {
+		view.info("Skipped. Run db-agent install again to enable dashboard restores later.")
 		return nil
 	}
-	view.status("WARN", "Restore access includes sensitive global CREATE USER account-management authority, not limited to agent-owned users. Data grants are restricted to the fm_restore_ namespace. This account must never execute backup SQL directly.")
 	persist := func(access config.RestoreConfig) error {
 		if err := verify(access); err != nil {
 			return err
@@ -87,23 +93,18 @@ func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.
 	if settings.Restore.User != "" {
 		access := settings.Restore
 		access.Authorized = true
-		if err := verify(access); err != nil {
+		stop := view.spin("Checking your saved restore user")
+		err := persist(access)
+		stop()
+		if err != nil {
 			return fmt.Errorf("saved restore account could not be verified: %w; use db-agent configure --restore-access to repair it", err)
 		}
-		confirmed, err := confirmInstallRestores(input, output, "Type AUTHORIZE to re-enable the verified existing restore account")
-		if err != nil || !confirmed {
-			return err
-		}
-		if err := persist(access); err != nil {
-			return err
-		}
-	} else {
-		if err := createInstallRestoreAccount(ctx, input, output, settings.Database, admin, readSecret, setup, persist); err != nil {
-			return fmt.Errorf("dashboard restore setup incomplete: %w; backup settings are preserved; rerun db-agent install to resume or continue backup-only", err)
-		}
+		view.ok("Dashboard restores enabled")
 		return nil
 	}
-	view.status("OK", "Dashboard restore access saved privately. Backup access and the recovery key are unchanged; no restore was run.")
+	if err := createInstallRestoreAccount(ctx, input, output, settings.Database, admin, readSecret, setup, persist); err != nil {
+		return fmt.Errorf("dashboard restore setup incomplete: %w; backup settings are preserved; rerun db-agent install to resume or continue backup-only", err)
+	}
 	return nil
 }
 
@@ -111,69 +112,56 @@ func createInstallRestoreAccount(ctx context.Context, input *bufio.Reader, outpu
 	view := newSetupOutput(output)
 	var report database.Report
 	if admin.User != "" {
+		stop := view.spin("Checking admin access")
 		report = setup.inspect(ctx, admin)
+		stop()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
 	if !report.CanCreateUser {
-		view.status("INFO", "A local administrator is needed once to create the separate restore account. Admin credentials are used in memory only and never saved.")
+		view.info("We need a database admin login once to create it. It's never saved.")
 		admin = backup
 		var err error
-		admin.User, err = prompt(input, output, "Local database administrator username", "root")
+		admin.User, err = prompt(input, output, "Admin username", "root")
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(output, "Local administrator password (hidden): ")
+		view.ask("Admin password", "hidden")
 		admin.Password, err = readSecret()
 		fmt.Fprintln(output)
 		if err != nil {
 			return errors.New("cannot read administrator password from the local terminal; no restore account was created")
 		}
+		stop := view.spin("Checking admin access")
 		report = setup.inspect(ctx, admin)
+		stop()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if len(report.Checks) >= 4 && !checksPassed(report.Checks[:4]) {
+		printFailedChecks(output, report.Checks[:4])
+		return errors.New("administrator connection checks failed; no restore account was created")
 	}
 	if len(report.Checks) < 4 || !report.CanCreateUser || report.Driver != backup.Driver {
 		return errors.New("administrator connection or CREATE USER permission could not be verified; no restore account was created")
 	}
-	if !printChecks(output, report.Checks[:4]) {
-		return errors.New("administrator connection checks failed; no restore account was created")
-	}
 	admin.Driver = report.Driver
-	statements, err := database.LocalRestoreAccountSQL(backup, report.ClientHost)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(output, "Separate restore account SQL for the exact server-observed client host %q (existing accounts are never modified):\n", report.ClientHost)
-	for _, statement := range statements {
-		fmt.Fprintf(output, "    %s;\n", statement)
-	}
-	confirmed, err := confirmInstallRestores(input, output, "Type AUTHORIZE to create this separate account and enable dashboard restores")
-	if err != nil || !confirmed {
+	if _, err := database.LocalRestoreAccountSQL(backup, report.ClientHost); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := setup.provision(ctx, admin, backup, report.ClientHost, persist); err != nil {
+	stop := view.spin("Creating the restore user")
+	err := setup.provision(ctx, admin, backup, report.ClientHost, persist)
+	stop()
+	if err != nil {
 		return err
 	}
-	view.status("OK", "Dashboard restore account created, verified, and saved privately. Backup access and the recovery key are unchanged; no restore was run.")
+	view.ok("Restore user created. Dashboard restores enabled")
 	return nil
-}
-
-func confirmInstallRestores(input *bufio.Reader, output io.Writer, message string) (bool, error) {
-	answer, err := prompt(input, output, message, "")
-	if err != nil {
-		return false, err
-	}
-	if strings.TrimSpace(answer) != "AUTHORIZE" {
-		newSetupOutput(output).status("INFO", "Restore authorization not confirmed. No restore account or authorization was changed; backup-only setup will continue.")
-		return false, nil
-	}
-	return true, nil
 }
 
 func safeRestoreCheck(err error) error {

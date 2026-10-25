@@ -37,7 +37,7 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	fmt.Fprintln(output, "\nRestores go into a new, separate database, not your live game database.")
 	fmt.Fprintln(output, "This optional setup only checks and saves a restore account on this machine.")
 	fmt.Fprintln(output, "It does not change SQL users, databases, backup access, or your recovery key.")
-	view.step(1, 3, "Restore account", "Use a database account created only for restores.")
+	view.step(1, 3, "Restore account")
 	fmt.Fprintln(output, "  Not root, your game-server login, or your read-only backup login.")
 	fmt.Fprintln(output, "  Need an account? Enter ? for instructions for your database administrator.")
 	user, err := promptRestoreUser(ctx, input, output, backup.User)
@@ -45,7 +45,7 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 		return err
 	}
 	fmt.Fprintln(output, "  The password stays in your private local config, never sent to FiveManage.")
-	fmt.Fprint(output, "Restore account password (hidden): ")
+	view.ask("Restore account password", "hidden")
 	password, err := readSecret()
 	fmt.Fprintln(output)
 	if err != nil {
@@ -55,19 +55,21 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := access.ValidateFor(backup); err != nil {
 		return err
 	}
-	view.step(2, 3, "Check access", "Test the connection and permissions without changing the database.")
-	test, err := prompt(input, output, "Check this account now? (y/N)", "")
+	view.step(2, 3, "Check access")
+	test, err := confirm(input, output, "Check this account now?", false)
 	if err != nil {
 		return err
 	}
-	if !affirmative(test) {
+	if !test {
 		return errors.New("restore authorization canceled; existing settings are preserved")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	view.status("INFO", "Checking restore account...")
-	if err := check(ctx, backup, access); err != nil {
+	stop := view.spin("Checking restore account")
+	err = check(ctx, backup, access)
+	stop()
+	if err != nil {
 		switch {
 		case errors.Is(err, context.Canceled):
 			return context.Canceled
@@ -83,8 +85,8 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 			return errors.New("cannot verify local restore provisioning access; no authorization was saved")
 		}
 	}
-	view.status("OK", "Connection and restore permissions verified.")
-	view.step(3, 3, "Authorize future restores", "Review what this account allows before saving.")
+	view.ok("Connection and restore permissions verified.")
+	view.step(3, 3, "Authorize future restores")
 	fmt.Fprintln(output, "  - Can create and manage SQL users server-wide (CREATE USER).")
 	fmt.Fprintln(output, "    This is a powerful permission. Keep this account private.")
 	fmt.Fprintln(output, "  - Can create databases and grant access within fm_restore_ only.")
@@ -103,7 +105,7 @@ func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.
 	if err := save(access); err != nil {
 		return errors.New("cannot finish saving private restore authorization; inspect the local config before retrying; no restore was run")
 	}
-	view.status("OK", "Restore access saved on this machine.")
+	view.ok("Restore access saved on this machine.")
 	fmt.Fprintln(output, "  Backup access and your recovery key are unchanged. No restore was run.")
 	return nil
 }
@@ -121,11 +123,11 @@ func promptRestoreUser(ctx context.Context, input *bufio.Reader, output io.Write
 		case user == "?":
 			printRestoreAccountHelp(output)
 		case user == "":
-			newSetupOutput(output).status("WARN", "Enter the restore account username, or ? for setup instructions.")
+			newSetupOutput(output).warn("Enter the restore account username, or ? for setup instructions.")
 		case strings.EqualFold(user, "root"):
-			newSetupOutput(output).status("WARN", "Do not use root here. Enter a separate account created only for restores.")
+			newSetupOutput(output).warn("Do not use root here. Enter a separate account created only for restores.")
 		case strings.EqualFold(user, backupUser):
-			newSetupOutput(output).status("WARN", "That is your backup account. Keep it read-only and use a separate restore account.")
+			newSetupOutput(output).warn("That is your backup account. Keep it read-only and use a separate restore account.")
 		default:
 			return user, nil
 		}

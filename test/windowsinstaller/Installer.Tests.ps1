@@ -3,6 +3,16 @@ BeforeAll {
     $script:OnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 }
 
+Describe 'Native architecture detection' {
+    It 'uses the framework architecture even when another module shadows RuntimeInformation' {
+        $engine = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $output = & $engine -NoLogo -NoProfile -NonInteractive -File "$PSScriptRoot/architecture-collision.ps1" `
+            -InstallerPath "$PSScriptRoot/../../scripts/install-windows.ps1" 2>&1
+        $LASTEXITCODE | Should -Be 0 -Because ($output -join [Environment]::NewLine)
+        $output | Should -Contain 'Architecture collision regression passed.'
+    }
+}
+
 Describe 'Windows installer trust and publication' {
     BeforeEach {
         $script:FixtureBytes = [Text.Encoding]::UTF8.GetBytes('approved release fixture')

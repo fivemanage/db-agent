@@ -21,32 +21,32 @@ func TestInstallOffersBackupOnlyWithoutInspectingOrChangingRestoreAccess(t *test
 		var output bytes.Buffer
 		err := setupDashboardRestores(context.Background(), bufio.NewReader(strings.NewReader(answer)), &output, installRestoreSettings(), config.DatabaseConfig{},
 			func() (string, error) { t.Fatal("declined setup asked for admin credentials"); return "", nil }, restoreInstallSetup{})
-		if err != nil || !strings.Contains(output.String(), "Enable dashboard restores? [y/N]") || !strings.Contains(output.String(), "Backup-only setup will continue") {
+		if err != nil || !strings.Contains(output.String(), "Create a restore user? (y/N)") || !strings.Contains(output.String(), "Skipped.") {
 			t.Fatalf("backup-only choice failed: %v", err)
 		}
 	}
 }
 
 func TestInstallCreatesSeparateRestoreAccountOnlyAfterExplicitApproval(t *testing.T) {
-	for _, scenario := range []string{"new_install", "resume", "existing_backup", "decline_authorization", "eof", "bad_admin", "no_create_user", "unknown_host", "bad_grants", "raw_check_error", "save_error", "secret_error", "canceled", "cancel_during_inspect", "cancel_during_check"} {
+	for _, scenario := range []string{"new_install", "resume", "existing_backup", "declined", "eof", "bad_admin", "no_create_user", "unknown_host", "bad_grants", "raw_check_error", "save_error", "secret_error", "canceled", "cancel_during_inspect", "cancel_during_check"} {
 		t.Run(scenario, func(t *testing.T) {
 			settings := installRestoreSettings()
 			admin := settings.Database
 			admin.User, admin.Password = "root", "admin-private"
-			input := "y\nAUTHORIZE\n"
+			input := "y\n"
 			if scenario == "resume" || scenario == "secret_error" {
 				admin = config.DatabaseConfig{}
-				input = "y\nroot\nAUTHORIZE\n"
+				input = "y\nroot\n"
 			}
 			if scenario == "existing_backup" {
 				admin = settings.Database
-				input = "y\nroot\nAUTHORIZE\n"
+				input = "y\nroot\n"
 			}
-			if scenario == "decline_authorization" {
-				input = "y\nn\n"
+			if scenario == "declined" {
+				input = "n\n"
 			}
 			if scenario == "eof" {
-				input = "y\n"
+				input = ""
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -79,10 +79,8 @@ func TestInstallCreatesSeparateRestoreAccountOnlyAfterExplicitApproval(t *testin
 					if supplied.User != "root" || supplied.Password != "admin-private" || backup.User != "backup" || host != "172.19.0.1" {
 						t.Fatal("restore setup did not preserve distinct admin and backup identities")
 					}
-					for _, want := range []string{"CREATE USER 'db_agent_restore'@'172.19.0.1' IDENTIFIED BY '<generated password>'", "GRANT CREATE USER ON *.*", "ON `fm\\_restore\\_%`.*", "WITH GRANT OPTION", "Type AUTHORIZE", "not limited to agent-owned users"} {
-						if !strings.Contains(text, want) {
-							t.Fatalf("missing permission preview %q", want)
-						}
+					if !strings.Contains(text, "create databases and users") || strings.Contains(text, "CREATE USER") || strings.Contains(text, "GRANT") {
+						t.Fatal("restore setup must disclose account-management access without printing SQL")
 					}
 					return persist(config.RestoreConfig{Authorized: true, Driver: backup.Driver, Host: backup.Host, Port: backup.Port, User: "db_agent_restore", Password: "restore-private"})
 				},
@@ -122,7 +120,7 @@ func TestInstallCreatesSeparateRestoreAccountOnlyAfterExplicitApproval(t *testin
 			}, setup)
 			success := scenario == "new_install" || scenario == "resume" || scenario == "existing_backup"
 			wantCreate := success || scenario == "bad_grants" || scenario == "raw_check_error" || scenario == "save_error" || scenario == "cancel_during_check"
-			if (err == nil) != (success || scenario == "decline_authorization") || created != wantCreate || checked != wantCreate || saved != (success || scenario == "save_error") {
+			if (err == nil) != (success || scenario == "declined") || created != wantCreate || checked != wantCreate || saved != (success || scenario == "save_error") {
 				t.Fatalf("wrong setup result: created=%t checked=%t saved=%t err=%v", created, checked, saved, err)
 			}
 			if scenario == "new_install" && secrets != 0 || (scenario == "resume" || scenario == "existing_backup") && secrets != 1 {
@@ -163,12 +161,12 @@ func TestInstallPreservesAndRechecksExistingRestoreAuthorization(t *testing.T) {
 				},
 				save: func(config.RestoreConfig) error { saved = true; return nil },
 			}
-			err := setupDashboardRestores(context.Background(), bufio.NewReader(strings.NewReader("y\nAUTHORIZE\n")), &output, settings, config.DatabaseConfig{},
+			err := setupDashboardRestores(context.Background(), bufio.NewReader(strings.NewReader("y\n")), &output, settings, config.DatabaseConfig{},
 				func() (string, error) { t.Fatal("existing authorization asked for admin credentials"); return "", nil }, setup)
 			if (err == nil) != (scenario == "enabled" || scenario == "disabled") || checked != (scenario != "wrong_server") || saved != (scenario == "disabled") {
 				t.Fatalf("existing authorization changed or was not checked: saved=%t checked=%t err=%v", saved, checked, err)
 			}
-			if scenario == "enabled" && strings.Contains(output.String(), "Enable dashboard restores?") {
+			if scenario == "enabled" && strings.Contains(output.String(), "restore user?") {
 				t.Fatal("enabled restore access asked for setup again")
 			}
 		})
@@ -197,9 +195,9 @@ func TestInstallRestoreFailureDoesNotRetryOrRollBackSuccessfulBackupSetup(t *tes
 			return restoreErr
 		},
 	}
-	err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("1\ny\ny\n")), &output, config.DatabaseConfig{},
+	err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("1\ny\n")), &output, config.DatabaseConfig{},
 		func() (string, error) { return "mysql://root:admin-private@127.0.0.1/game_db", nil }, setup)
-	if !errors.Is(err, restoreErr) || !saved || !restored || strings.Contains(output.String(), "Try another connection") {
+	if !errors.Is(err, restoreErr) || !saved || !restored || strings.Contains(output.String(), "Try again") {
 		t.Fatalf("restore failure retried or rolled back backup setup: %v", err)
 	}
 }

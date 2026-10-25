@@ -68,14 +68,15 @@ Turn off terminal recording and PowerShell transcripts before setup, since it
 displays your recovery key.
 
 1. Enter the dashboard setup token.
-2. Paste your database connection string or enter the details manually. Setup
-   can create a backup account with your approval or use an existing one.
-   Database administrator credentials are never saved.
+2. Paste your database connection string or enter the details manually. If you
+   connect with an admin login, setup offers to create a read-only backup user
+   for you. Otherwise, use an existing backup login. Database administrator
+   credentials are never saved.
 3. Save the recovery key in a password manager or offline storage, then confirm
    your copy. The key is shown only once.
 
-Setup checks database access, dump tools, the recovery key, and API connectivity
-before installing and starting the service.
+Setup then checks database access, dump tools, the recovery key, and API
+connectivity before installing and starting the service.
 
 Supported connection-string forms include:
 
@@ -88,10 +89,11 @@ Percent-encode special characters in URI values. Remote database hosts and
 unsupported connection options are rejected.
 Do not save root or your database administrator account as the backup login.
 
-The optional **Enable dashboard restores? [y/N]** step creates a separate restore
-account. Review its permissions before authorizing it: this account can manage
-database users, while the backup account remains read-only. You can skip this
-step and enable restores later by rerunning `install`.
+Setup also asks **Create a restore user?** (default no) so you can restore backups
+from the dashboard. The restore user is separate from the read-only backup user
+and can create databases and database users, so keep this machine's database
+admin access protected. You can skip this step and enable restores later by
+rerunning `install`.
 
 If setup is interrupted, rerun `install` with the same config. It keeps your
 registration, database settings, and recovery key. Do not delete a key or pending

@@ -28,7 +28,7 @@ func TestDiagnosticCommandFailsDespiteAPIReachability(t *testing.T) {
 	command.SetContext(context.Background())
 	command.SetOut(&output)
 	err := testCmd.RunE(command, nil)
-	if err == nil || !strings.Contains(output.String(), "[PASS] Control-plane reachability:") || !strings.Contains(output.String(), "[FAIL] Database connectivity:") {
+	if err == nil || !strings.Contains(output.String(), "+ Control-plane reachability:") || !strings.Contains(output.String(), "x Database connectivity:") {
 		t.Fatalf("diagnostic result: err=%v output=%s", err, output.String())
 	}
 	if strings.Contains(output.String(), "never-print-this") {

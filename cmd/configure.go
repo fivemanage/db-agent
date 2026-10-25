@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fivemanage/db-agent/internal/config"
 	"github.com/fivemanage/db-agent/internal/database"
@@ -29,7 +31,7 @@ var configureCmd = &cobra.Command{
 			return err
 		}
 		if configureRestoreAccess {
-			newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Restore access setup", "Use an existing restore account for dashboard restores.")
+			newSetupOutput(cmd.OutOrStdout()).title("Restore access", "Use an existing restore user for dashboard restores.")
 			return configureLocalRestoreAccess(cmd, settings)
 		}
 
@@ -38,11 +40,12 @@ var configureCmd = &cobra.Command{
 		}
 
 		if configureKeyOnly {
-			newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Recovery key setup", "Preserve the original key and confirm a recovery copy stored outside this machine.")
+			newSetupOutput(cmd.OutOrStdout()).title("Recovery key", "Confirm you have a copy of your recovery key.")
+			newSetupOutput(cmd.OutOrStdout()).warn("Turn off terminal recording first. A new recovery key is shown once.")
 			return configureRecoveryKey(cmd, config.ResolvePath(configPath))
 		}
 
-		newSetupOutput(cmd.OutOrStdout()).title("FiveManage / Database connection setup", "Connection details -> Connection checks -> Backup account")
+		newSetupOutput(cmd.OutOrStdout()).title("Database connection", "Your database login stays on this machine.")
 		return configureLocalDatabase(cmd, settings.Database, false)
 	},
 }
@@ -78,7 +81,6 @@ type databaseSetup struct {
 
 func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, previous config.DatabaseConfig, readSecret func() (string, error), setup databaseSetup) error {
 	view := newSetupOutput(output)
-	view.status("INFO", "Supplied credentials stay in memory until a tested backup account is confirmed; admin credentials are never saved.")
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -94,18 +96,16 @@ func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Write
 			return fmt.Errorf("setup canceled: %w; enrollment and existing config/key are preserved", ctx.Err())
 		}
 		if err == nil {
-			view.status("OK", "Tested backup account saved privately.")
 			if setup.restore != nil {
 				return setup.restore(candidate)
 			}
-			view.status("INFO", "This database step does not install a service or execute a backup.")
-			view.detail("Diagnose", "db-agent test")
+			view.note("Run db-agent test to check the full setup.")
 			return nil
 		}
 
-		view.status("FAIL", fmt.Sprintf("Database setup: %v", err))
-		retry, inputErr := prompt(input, output, "Try another connection or existing backup account? [y/N]", "N")
-		if inputErr != nil || !affirmative(retry) {
+		view.fail(sentence(err.Error()))
+		retry, inputErr := confirm(input, output, "Try again?", true)
+		if inputErr != nil || !retry {
 			return fmt.Errorf("%w; enrollment and existing config/key are preserved; resume with db-agent configure", err)
 		}
 	}
@@ -113,87 +113,125 @@ func configureDatabase(ctx context.Context, input *bufio.Reader, output io.Write
 
 func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, candidate config.DatabaseConfig, setup databaseSetup) error {
 	view := newSetupOutput(output)
-	view.section("Connection checks")
-	view.status("INFO", "Testing the local connection and selected database before any changes...")
+	stop := view.spin("Testing the connection")
 	report := setup.inspect(ctx, candidate)
-	printChecks(output, report.Checks)
+	stop()
 
 	// Backup grants may be missing on an admin account, but connectivity,
 	// version and the selected schema must pass before any SQL changes.
-	if len(report.Checks) < 4 {
-		return errors.New("database connection checks failed; no settings were changed")
+	if len(report.Checks) < 4 || !checksPassed(report.Checks[:4]) {
+		printFailedChecks(output, report.Checks)
+		return fmt.Errorf("couldn't connect to %s; nothing was changed", describeConnection(candidate))
 	}
-	for _, check := range report.Checks[:4] {
-		if !check.Passed {
-			return errors.New("database connection or selection failed; no settings were changed")
-		}
-	}
+	view.ok(fmt.Sprintf("Connected to %s %s (%s)", serverName(report.Driver), displayText(report.Version), describeConnection(candidate)))
 
 	candidate.Driver = report.Driver
-	view.section("Backup account")
-	statements, planErr := database.LocalBackupAccountSQL(report.Driver, report.Version, candidate.Databases, candidate.Host, report.ClientHost)
-	if planErr == nil {
-		fmt.Fprintf(output, "Database sees this connection from %q; backup account access is restricted to exact hosts, never a wildcard.\n", report.ClientHost)
-		fmt.Fprintln(output, "Least-privilege account SQL (password placeholder is replaced privately; existing accounts are never modified):")
-		for _, statement := range statements {
-			fmt.Fprintf(output, "    %s;\n", statement)
-		}
-	} else {
-		view.status("WARN", fmt.Sprintf("Automatic account creation unavailable: %v", planErr))
-	}
-
-	if report.CanCreateUser && planErr == nil {
-		create, err := prompt(input, output, "Execute this SQL using the supplied account? [y/N]", "N")
-		if err != nil {
-			return err
-		}
-		if affirmative(create) {
-			view.status("INFO", "Creating the approved scoped backup account and verifying its access...")
-			return setup.provision(ctx, candidate, report.Driver, report.Version, report.ClientHost, func(backup config.DatabaseConfig) error {
-				verified := setup.inspect(ctx, backup)
-				printChecks(output, verified.Checks)
-				if !verified.Passed() || verified.Administrative {
-					return errors.New("generated account could not be verified; no database settings were saved")
-				}
-
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-
-				return setup.save(backup)
-			})
+	if report.CanCreateUser {
+		_, planErr := database.LocalBackupAccountSQL(report.Driver, report.Version, candidate.Databases, candidate.Host, report.ClientHost)
+		if planErr != nil {
+			view.warn(fmt.Sprintf("Can't create a backup user automatically: %v", planErr))
+		} else {
+			view.note("This is an admin login. We'll use it once to create a read-only backup user and never save it.")
+			create, err := confirm(input, output, "Create a read-only backup user?", true)
+			if err != nil {
+				return err
+			}
+			if create {
+				return createBackupAccount(ctx, output, candidate, report, setup)
+			}
 		}
 	}
 
 	if report.Administrative || strings.EqualFold(candidate.User, "root") {
-		return errors.New("admin credentials will not be saved; supply an existing backup account, or retry and approve scoped account creation")
+		return errors.New("admin logins are never saved; let setup create a backup user, or connect with an existing backup user")
 	}
 
 	if !report.Passed() {
-		return errors.New("this account lacks verified backup grants; ask a local administrator to grant the displayed schema/routine privileges to your backup account, then retry")
+		printFailedChecks(output, report.Checks)
+		return errors.New("this login is missing backup permissions; ask your database administrator to grant them, then try again")
 	}
 
-	confirm, err := prompt(input, output, "Use this existing backup account and save credentials locally for the confirmed scope? [y/N]", "N")
+	use, err := confirm(input, output, "Use this login for backups? It's saved on this machine only.", false)
 	if err != nil {
 		return err
 	}
-	if !affirmative(confirm) {
+	if !use {
 		return errors.New("configuration canceled; no settings were changed")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := setup.save(candidate); err != nil {
+		return err
+	}
 
-	return setup.save(candidate)
+	view.ok("Backup login saved")
+	return nil
+}
+
+func createBackupAccount(ctx context.Context, output io.Writer, admin config.DatabaseConfig, report database.Report, setup databaseSetup) error {
+	view := newSetupOutput(output)
+	var failed []database.Check
+	stop := view.spin("Creating the backup user")
+	err := setup.provision(ctx, admin, report.Driver, report.Version, report.ClientHost, func(backup config.DatabaseConfig) error {
+		verified := setup.inspect(ctx, backup)
+		if !verified.Passed() || verified.Administrative {
+			failed = verified.Checks
+			return errors.New("generated account could not be verified; no database settings were saved")
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		return setup.save(backup)
+	})
+	stop()
+	printFailedChecks(output, failed)
+	if err != nil {
+		return err
+	}
+
+	view.ok("Read-only backup user created")
+	return nil
+}
+
+func describeConnection(candidate config.DatabaseConfig) string {
+	names := make([]string, len(candidate.Databases))
+	for i, name := range candidate.Databases {
+		names[i] = displayText(name)
+	}
+
+	return fmt.Sprintf("%s@%s:%d/%s", displayText(candidate.User), displayText(candidate.Host), candidate.Port, strings.Join(names, ","))
+}
+
+func sentence(message string) string {
+	first, size := utf8.DecodeRuneInString(message)
+	if size == 0 {
+		return message
+	}
+
+	return string(unicode.ToUpper(first)) + message[size:]
+}
+
+func serverName(driver string) string {
+	switch driver {
+	case "mariadb":
+		return "MariaDB"
+	case "mysql":
+		return "MySQL"
+	default:
+		return displayText(driver)
+	}
 }
 
 func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous config.DatabaseConfig, readSecret func() (string, error)) (config.DatabaseConfig, error) {
 	view := newSetupOutput(output)
-	view.section("Connection details")
-	fmt.Fprintln(output, "  1. Paste game-server connection string (recommended)")
-	fmt.Fprintln(output, "  2. Enter host, port, username, password, and database manually")
-	mode, err := prompt(input, output, "Connection method", "1")
+	view.info("How should we connect to your database?")
+	view.note("1  Paste your game server's connection string (recommended)")
+	view.note("2  Enter the details manually")
+	mode, err := prompt(input, output, "Choose", "1")
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
@@ -201,7 +239,7 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 	var candidate config.DatabaseConfig
 	switch mode {
 	case "1":
-		fmt.Fprint(output, "Connection string (hidden; paste only its value): ")
+		view.ask("Connection string", "hidden")
 		secret, readErr := readSecret()
 		fmt.Fprintln(output)
 		if readErr != nil {
@@ -216,7 +254,7 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 				fallback = previous.Databases[0]
 			}
 			var name string
-			name, err = prompt(input, output, "Application database name", fallback)
+			name, err = prompt(input, output, "Database name", fallback)
 			candidate.Databases = []string{name}
 		}
 	default:
@@ -228,20 +266,6 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 	}
 	if err := database.ValidateLocalConnection(candidate); err != nil {
 		return config.DatabaseConfig{}, err
-	}
-
-	view.section("Review connection")
-	view.detail("Host", fmt.Sprintf("%q", candidate.Host))
-	view.detail("Port", strconv.Itoa(candidate.Port))
-	view.detail("User", fmt.Sprintf("%q", candidate.User))
-	view.detail("Databases", fmt.Sprintf("%q", candidate.Databases))
-	view.detail("Password", "(hidden)")
-	confirm, err := prompt(input, output, "Test this connection and backup scope? [y/N]", "N")
-	if err != nil {
-		return config.DatabaseConfig{}, err
-	}
-	if !affirmative(confirm) {
-		return config.DatabaseConfig{}, errors.New("connection not confirmed; no settings were changed")
 	}
 
 	return candidate, nil
@@ -263,12 +287,12 @@ func promptConnection(input *bufio.Reader, output io.Writer, candidate config.Da
 		candidate.Driver = "mysql"
 	}
 
-	candidate.Host, err = prompt(input, output, "Database host", candidate.Host)
+	candidate.Host, err = prompt(input, output, "Host", candidate.Host)
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
 
-	port, err := prompt(input, output, "Database TCP port", strconv.Itoa(candidate.Port))
+	port, err := prompt(input, output, "Port", strconv.Itoa(candidate.Port))
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
@@ -277,12 +301,12 @@ func promptConnection(input *bufio.Reader, output io.Writer, candidate config.Da
 		return config.DatabaseConfig{}, errors.New("database port must be a number between 1 and 65535")
 	}
 
-	candidate.User, err = prompt(input, output, "Local account username (existing game-server or backup account)", candidate.User)
+	candidate.User, err = prompt(input, output, "Username", candidate.User)
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
 
-	fmt.Fprint(output, "Database password (hidden): ")
+	newSetupOutput(output).ask("Password", "hidden")
 	candidate.Password, err = readSecret()
 	fmt.Fprintln(output)
 	if err != nil {
@@ -311,35 +335,15 @@ func promptScope(input *bufio.Reader, output io.Writer, visible []string) ([]str
 	}
 
 	fmt.Fprintf(output, "Backup scope: %q\n", selected)
-	confirm, err := prompt(input, output, "Save credentials locally for this scope? [y/N]", "N")
+	save, err := confirm(input, output, "Save credentials locally for this scope?", false)
 	if err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(confirm, "y") && !strings.EqualFold(confirm, "yes") {
+	if !save {
 		return nil, errors.New("configuration canceled; no settings were changed")
 	}
 
 	return selected, nil
-}
-
-func prompt(input *bufio.Reader, output io.Writer, label, fallback string) (string, error) {
-	if fallback == "" {
-		fmt.Fprintf(output, "%s: ", label)
-	} else {
-		fmt.Fprintf(output, "%s [%s]: ", label, strconv.Quote(fallback))
-	}
-
-	line, err := input.ReadString('\n')
-	if err != nil {
-		return "", errors.New("setup input ended; no settings were changed")
-	}
-
-	line = strings.TrimSpace(line)
-	if line == "" {
-		line = fallback
-	}
-
-	return line, nil
 }
 
 func selectDatabases(choice string, visible []string) ([]string, error) {

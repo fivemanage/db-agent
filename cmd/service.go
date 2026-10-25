@@ -28,26 +28,37 @@ func serviceCommand(action string) *cobra.Command {
 }
 
 func controlService(path string, output io.Writer, factory func(*manager.Config) (services.Controller, error), actions ...string) error {
+	messages, err := serviceActions(path, factory, actions...)
+	view := newSetupOutput(output)
+	for _, message := range messages {
+		view.ok(message)
+	}
+
+	return err
+}
+
+func serviceActions(path string, factory func(*manager.Config) (services.Controller, error), actions ...string) ([]string, error) {
 	cfg, err := services.Config(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	svc, err := factory(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var messages []string
 	for _, action := range actions {
 		message, err := services.Control(svc, action)
 		if err != nil {
-			return err
+			return messages, err
 		}
 
-		fmt.Fprintln(output, message)
+		messages = append(messages, message)
 	}
 
-	return nil
+	return messages, nil
 }
 
 var serviceRunCmd = &cobra.Command{

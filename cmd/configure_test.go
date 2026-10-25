@@ -41,9 +41,9 @@ func TestWizardNeverSavesSuppliedAdminCredentials(t *testing.T) {
 		name, input    string
 		saved, created bool
 	}{
-		{"approved SQL", "1\ny\ny\n", true, true},
-		{"declined SQL", "1\ny\nn\nn\n", false, false},
-		{"unconfirmed connection", "1\nn\nn\n", false, false},
+		{"approved account creation", "1\ny\n", true, true},
+		{"declined account creation", "1\nn\nn\n", false, false},
+		{"input ended", "1\n", false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
@@ -104,7 +104,7 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 			return nil
 		},
 	}
-	err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("1\ny\ny\n1\ny\ny\n")), &output, config.DatabaseConfig{}, func() (string, error) { return "mysql://backup:private-backup-password@127.0.0.1/game", nil }, setup)
+	err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("1\ny\n1\ny\n")), &output, config.DatabaseConfig{}, func() (string, error) { return "mysql://backup:private-backup-password@127.0.0.1/game", nil }, setup)
 	if err != nil || !saved || inspections != 2 {
 		t.Fatalf("retry failed: %v", err)
 	}
@@ -112,9 +112,9 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 		t.Fatal("backup password leaked")
 	}
 	text := output.String()
-	for _, want := range []string{"Connection details", "Review connection", "Connection checks", "Backup account", "[FAIL] Database setup:", "[OK] Tested backup account saved privately."} {
+	for _, want := range []string{"x Couldn't connect to backup@127.0.0.1:3306/game", "Try again? (Y/n)", "+ Connected to MySQL 8.4.0", "+ Backup login saved"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("missing setup feedback %q", want)
+			t.Fatalf("missing setup feedback %q in %s", want, text)
 		}
 	}
 	if strings.ContainsAny(text, "\x1b\r") {
@@ -122,24 +122,24 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 	}
 }
 
-func TestConnectionReviewHidesSecretsAndEscapesTerminalContent(t *testing.T) {
+func TestConnectionSummaryHidesSecretsAndEscapesTerminalContent(t *testing.T) {
 	var output bytes.Buffer
 	connection := "mysql://backup%1B%5B31m:private-review-password@127.0.0.1/game"
-	input := bufio.NewReader(strings.NewReader("1\ny\n"))
-
+	input := bufio.NewReader(strings.NewReader("1\nn\n"))
 	candidate, err := promptDatabaseConnection(input, &output, config.DatabaseConfig{}, func() (string, error) { return connection, nil })
 	if err != nil || candidate.User != "backup\x1b[31m" || candidate.Password != "private-review-password" {
-		t.Fatalf("connection review failed: %v", err)
+		t.Fatalf("connection prompt failed: %v", err)
 	}
+	setup := databaseSetup{inspect: func(context.Context, config.DatabaseConfig) database.Report { return setupReport(false) }}
+
+	err = setupDatabase(context.Background(), input, &output, candidate, setup)
 
 	text := output.String()
-	for _, want := range []string{"Review connection", "Host         \"127.0.0.1\"", "Port         3306", `User         "backup\x1b[31m"`, `Databases    ["game"]`, "Password     (hidden)"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("missing connection detail %q", want)
-		}
+	if err == nil || !strings.Contains(text, `Connected to MySQL 8.4.0 ("backup\x1b[31m"@127.0.0.1:3306/game)`) {
+		t.Fatalf("missing escaped connection summary: %s", text)
 	}
 	if strings.ContainsRune(text, '\x1b') || strings.Contains(text, connection) || strings.Contains(text, candidate.Password) {
-		t.Fatal("connection review emitted a secret or terminal escape")
+		t.Fatal("connection summary emitted a secret or terminal escape")
 	}
 }
 
@@ -158,10 +158,6 @@ func TestWizardApprovesObservedClientHostBeforeProvisioning(t *testing.T) {
 				if !approve || host != "172.19.0.1" || admin.Host != "localhost" {
 					t.Fatal("unapproved host or incorrect destination passed to provisioning")
 				}
-				if !strings.Contains(output.String(), "CREATE USER 'db_agent_backup'@'172.19.0.1' IDENTIFIED BY '<generated password>';") ||
-					strings.Contains(output.String(), "'db_agent_backup'@'localhost'") || strings.Contains(output.String(), "'db_agent_backup'@'%'") {
-					t.Fatal("approved SQL does not match the exact bridge identity")
-				}
 				backup := admin
 				backup.User, backup.Password = "db_agent_backup", "generated-private-password"
 				return persist(backup)
@@ -176,8 +172,8 @@ func TestWizardApprovesObservedClientHostBeforeProvisioning(t *testing.T) {
 		if created != approve || saved != approve || (err == nil) != approve {
 			t.Fatalf("approval not enforced: approved=%t created=%t saved=%t err=%v", approve, created, saved, err)
 		}
-		if strings.Contains(output.String(), "generated-private-password") {
-			t.Fatal("generated password leaked")
+		if strings.Contains(output.String(), "generated-private-password") || strings.Contains(output.String(), "CREATE USER") {
+			t.Fatal("generated password or account SQL shown to the user")
 		}
 	}
 }
@@ -254,7 +250,7 @@ func TestPrintChecksFailsOnSkippedPrerequisites(t *testing.T) {
 	if printChecks(&output, checks) {
 		t.Fatal("skipped DB check counted as passing")
 	}
-	if output.String() != "[PASS] API: reached\n[SKIP] DB: configure first\n" {
+	if output.String() != "  + API: reached\n  - DB: configure first\n" {
 		t.Fatalf("output=%q", output.String())
 	}
 }

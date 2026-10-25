@@ -68,9 +68,9 @@ func TestRestoreSetupRequiresExplicitApprovalAndNeverEchoesSecrets(t *testing.T)
 				previous := -1
 				for _, want := range []string{
 					"[1/3] Restore account", "Restore account password (hidden)",
-					"[2/3] Check access", "[OK] Connection and restore permissions verified.",
+					"[2/3] Check access", "+ Connection and restore permissions verified.",
 					"[3/3] Authorize future restores", "SQL users server-wide (CREATE USER)",
-					"Type AUTHORIZE", "[OK] Restore access saved on this machine.",
+					"Type AUTHORIZE", "+ Restore access saved on this machine.",
 				} {
 					position := strings.Index(text, want)
 					if position <= previous {
@@ -106,7 +106,7 @@ func TestRestoreSetupRejectsBackupAndRootAccountsBeforePassword(t *testing.T) {
 					return nil
 				},
 				func(config.RestoreConfig) error { t.Fatal("unsafe account was saved"); return nil })
-			if err == nil || !strings.Contains(output.String(), "[WARN]") || !strings.Contains(output.String(), "separate") {
+			if err == nil || !strings.Contains(output.String(), "  ! ") || !strings.Contains(output.String(), "separate") {
 				t.Fatalf("unsafe account needs an actionable warning before retrying: %v, %s", err, output.String())
 			}
 			if strings.Contains(output.String(), "password (hidden)") {

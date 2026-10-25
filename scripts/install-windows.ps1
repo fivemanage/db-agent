@@ -32,8 +32,11 @@ function Get-DbAgentRelease {
 }
 
 function Get-DbAgentNativeArchitecture {
-    $runtime = 'System.Runtime.InteropServices.RuntimeInformation' -as [type]
-    if ($null -ne $runtime) { return $runtime::OSArchitecture.ToString() }
+    # PSReadLine can shadow the unqualified type with one lacking OSArchitecture.
+    $runtime = 'System.Runtime.InteropServices.RuntimeInformation, mscorlib' -as [type]
+    if ($null -ne $runtime -and $null -ne $runtime.GetProperty('OSArchitecture')) {
+        return $runtime::OSArchitecture.ToString()
+    }
     $processors = @(Get-CimInstance -ClassName Win32_Processor -Property Architecture -ErrorAction Stop)
     if ($processors.Count -gt 0 -and @($processors | Where-Object { $_.Architecture -ne 9 }).Count -eq 0) { return 'X64' }
     return 'Unsupported'

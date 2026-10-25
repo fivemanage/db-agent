@@ -39,7 +39,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 			return err
 		}
 
-		output.status("OK", "Existing acknowledged recovery key preserved; it will not be displayed again.")
+		output.ok("Recovery key already saved")
 
 		return nil
 	}
@@ -48,18 +48,24 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		return errors.New("recovery-key setup requires an interactive terminal with unredirected stdout; do not record the terminal or run under a service/log collector")
 	}
 
-	output.status("WARN", "Disable terminal recording/transcripts. The key is shown only once; save it outside this machine.")
 	input := bufio.NewReader(os.Stdin)
 	err = setupRecoveryKey(cmd.Context(), path, func(recovery string) error {
 		// The only secret output bypasses command/log writers and goes directly
 		// to the verified terminal, never to redirected stdout or a service log.
-		_, err := fmt.Fprintf(os.Stdout, "Save this key somewhere safe. Without it, your backups cannot be restored. We do not have a copy.\nRecovery key (shown once):\n%s\n", recovery)
-		return err
+		terminal := newSetupOutput(os.Stdout)
+		_, err := fmt.Fprintf(os.Stdout, "  Your recovery key (shown once):\n\n      %s\n\n", terminal.styled(recovery, "1;33"))
+		if err != nil {
+			return err
+		}
+		terminal.warn("Save it in a password manager or somewhere off this server.")
+		terminal.note("Without it your backups can't be restored. FiveManage doesn't keep a copy.")
+		return nil
 	}, func(existing bool, k key.Key) error {
 		if existing {
-			output.status("WARN", "Existing recovery key preserved; it will not be displayed. Use your saved copy, or copy the protected key file locally to safe offline storage before continuing.")
+			output.info("This server already has a recovery key. It isn't shown again.")
+			output.note("Lost your copy? Back up the key file from the agent's config folder first.")
 		}
-		fmt.Fprint(cmd.OutOrStdout(), "Paste your saved recovery key (hidden): ")
+		output.ask("Paste your saved key to confirm", "hidden")
 		entered, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Fprintln(cmd.OutOrStdout())
 		if err != nil {
@@ -69,10 +75,11 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		matches := k.Matches(string(entered))
 		clear(entered)
 		if !matches {
+			output.fail("That key doesn't match.")
 			return errors.New("saved recovery key does not match")
 		}
 
-		answer, err := prompt(input, cmd.OutOrStdout(), "Type SAVED to confirm this key is stored safely outside this machine", "")
+		answer, err := prompt(input, cmd.OutOrStdout(), "Type SAVED once it's stored safely off this server", "")
 		if err != nil || strings.TrimSpace(answer) != "SAVED" {
 			return errors.New("recovery key was not acknowledged")
 		}
@@ -80,7 +87,7 @@ func configureRecoveryKey(cmd *cobra.Command, path string) error {
 		return nil
 	})
 	if err == nil {
-		output.status("OK", "Recovery key acknowledged and saved privately. No backup was executed by this step.")
+		output.ok("Recovery key confirmed")
 	}
 
 	return err
