@@ -212,10 +212,13 @@ LocalSystem on Windows or root on Linux. If you've already registered the agent,
 the executable or config path used by an existing service, uninstall and reinstall
 the service.
 
-Release builds check for signed updates at startup and every 24 hours when
-`auto_update` is enabled. The agent verifies signatures and checksums before
-replacement, with rollback if restart fails. Development builds skip automatic
-checks.
+Release builds check GitHub Releases at startup and every 24 hours when
+`auto_update` is enabled. Stable installations use the published Latest stable
+release; prerelease installations use the newest published staging candidate.
+Drafts are never selected. No GitHub login or token is needed. The agent verifies
+signatures and checksums before replacement, with rollback if restart fails.
+Development builds skip automatic checks. A local `update_url` can override GitHub
+with an HTTPS signed-manifest feed; `{os}` and `{arch}` expand to your platform.
 
 Stable installations accept only stable updates. Prerelease builds use a separate
 test channel and should run on isolated test systems, not production servers.

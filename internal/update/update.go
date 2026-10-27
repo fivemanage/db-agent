@@ -132,6 +132,10 @@ func (c Client) httpClient() *http.Client {
 }
 
 func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
+	if c.ManifestURL == "" {
+		return c.checkGitHub(ctx)
+	}
+
 	if err := requireHTTPS(c.ManifestURL); err != nil {
 		return Manifest{}, false, fmt.Errorf("manifest URL: %w", err)
 	}
@@ -178,14 +182,9 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 		return Manifest{}, false, errors.New("update manifest is too large")
 	}
 
-	var manifest Manifest
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
-		return Manifest{}, false, fmt.Errorf("decode update manifest: %w", err)
-	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return Manifest{}, false, errors.New("update manifest contains trailing data")
+	manifest, err := decodeManifest(body)
+	if err != nil {
+		return Manifest{}, false, err
 	}
 
 	available, err := manifest.Verify(c.PublicKey, c.Version, goos, goarch)
@@ -194,6 +193,19 @@ func (c Client) Check(ctx context.Context) (Manifest, bool, error) {
 	}
 
 	return manifest, available, nil
+}
+
+func decodeManifest(body []byte) (Manifest, error) {
+	var manifest Manifest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return Manifest{}, fmt.Errorf("decode update manifest: %w", err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return Manifest{}, errors.New("update manifest contains trailing data")
+	}
+	return manifest, nil
 }
 
 // Stage downloads a verified executable alongside the installed binary. The caller
