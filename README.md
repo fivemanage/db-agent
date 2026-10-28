@@ -75,6 +75,16 @@ displays your recovery key.
 3. Save the recovery key in a password manager or offline storage, then confirm
    your copy. The key is shown only once.
 
+After you generate a setup token, the dashboard's copyable install command can
+pass it directly to setup, so you don't need to paste it a second time. That
+command contains a secret and may remain in your clipboard or shell history;
+it can also appear in process arguments or system/sudo logs. Don't share it.
+The installers accept `--auth '<setup-token>'` on Linux or
+`-AuthToken '<setup-token>'` on Windows. They pass it internally through a temporary
+environment variable, not through agent arguments. The agent clears that variable
+before starting child processes and saves only the issued agent credential,
+never the setup token. Omitting the argument keeps the hidden token prompt.
+
 Setup then checks database access, dump tools, the recovery key, and API
 connectivity before installing and starting the service.
 

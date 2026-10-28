@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [switch]$ServiceOnly,
-    [string]$Config
+    [string]$Config,
+    [string]$AuthToken
 )
 
 # The publisher verifies the Ed25519 manifest before pinning these values. No
@@ -187,19 +188,25 @@ function Receive-DbAgentFile {
 }
 
 function Invoke-DbAgentSetup {
-    param([string]$Path, [switch]$ServiceOnly, [string]$Config)
+    param([string]$Path, [switch]$ServiceOnly, [string]$Config, [string]$AuthToken)
     $arguments = @('install')
     if ($ServiceOnly) { $arguments += '--service-only' }
     if ($Config) { $arguments += @('--config', $Config) }
-    & $Path @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Setup did not finish (exit code $LASTEXITCODE). The verified binary and saved config/key remain. Resume with db-agent.exe install."
+    $previousToken = [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process')
+    try {
+        if ($AuthToken) { [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $AuthToken, 'Process') }
+        & $Path @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Setup did not finish (exit code $LASTEXITCODE). The verified binary and saved config/key remain. Resume with db-agent.exe install."
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $previousToken, 'Process')
     }
 }
 
 function Invoke-DbAgentInstall {
     [CmdletBinding()]
-    param([switch]$ServiceOnly, [string]$Config)
+    param([switch]$ServiceOnly, [string]$Config, [string]$AuthToken)
     Set-StrictMode -Version 2.0
     $ErrorActionPreference = 'Stop'
     Assert-DbAgentWindows
@@ -236,9 +243,9 @@ function Invoke-DbAgentInstall {
         [IO.Directory]::Delete($work, $false)
     }
     Write-Information "Verified db-agent $($release.Version) installed at $executable. Starting setup; service startup is not proof of a completed backup." -InformationAction Continue
-    Invoke-DbAgentSetup $executable -ServiceOnly:$ServiceOnly -Config $Config
+    Invoke-DbAgentSetup $executable -ServiceOnly:$ServiceOnly -Config $Config -AuthToken $AuthToken
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-DbAgentInstall -ServiceOnly:$ServiceOnly -Config $Config
+    Invoke-DbAgentInstall -ServiceOnly:$ServiceOnly -Config $Config -AuthToken $AuthToken
 }

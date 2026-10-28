@@ -21,11 +21,17 @@ var defaultAPIURL string
 var installAPIURL string
 var installServiceOnly bool
 
+const setupTokenEnvironment = "DB_AGENT_SETUP_TOKEN"
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Register or resume setup and install the agent service",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		setupToken, err := consumeSetupToken()
+		if err != nil {
+			return err
+		}
 		path := config.ResolvePath(configPath)
 		if installServiceOnly {
 			if _, err := config.LoadAgent(path); err != nil {
@@ -41,6 +47,11 @@ var installCmd = &cobra.Command{
 		output.step(1, 5, "Connect to FiveManage")
 
 		settings, err := ensureEnrollment(cmd.Context(), path, installAPIURL, func() (string, error) {
+			if setupToken != "" {
+				token := setupToken
+				setupToken = ""
+				return token, nil
+			}
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return "", errors.New("install requires an interactive terminal for hidden token input")
 			}
@@ -185,6 +196,16 @@ func ensureEnrollment(ctx context.Context, path, apiURL string, readToken func()
 	}
 
 	return config.LoadDiagnostic(path)
+}
+
+func consumeSetupToken() (string, error) {
+	token := strings.TrimSpace(os.Getenv(setupTokenEnvironment))
+	// Clear it before diagnostics, dump clients, or service setup can start child
+	// processes. Enrollment alone receives the short-lived setup token.
+	if err := os.Unsetenv(setupTokenEnvironment); err != nil {
+		return "", errors.New("cannot clear the temporary setup token environment")
+	}
+	return token, nil
 }
 
 func init() {

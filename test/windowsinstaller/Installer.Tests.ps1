@@ -42,6 +42,13 @@ Describe 'Windows installer trust and publication' {
         @(Get-ChildItem (Split-Path $installed) -Directory -Filter '.install-*').Count | Should -Be 0
     }
 
+    It 'passes the literal auth token only to verified setup' {
+        Invoke-DbAgentInstall -ServiceOnly -AuthToken 'ark_tk_literal_''_$(never-evaluate);_fixture'
+        Should -Invoke Invoke-DbAgentSetup -Times 1 -Exactly -ParameterFilter {
+            $AuthToken -ceq 'ark_tk_literal_''_$(never-evaluate);_fixture'
+        }
+    }
+
     It 'rejects a bad checksum before running ANY downloaded code' {
         $script:DbAgentReleaseSHA256 = '0' * 64
         { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*checksum mismatch*'
@@ -95,6 +102,51 @@ Describe 'Windows installer trust and publication' {
         { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*unsafe owner*'
         Should -Invoke New-DbAgentDirectory -Times 0
         Should -Invoke Receive-DbAgentFile -Times 0
+    }
+}
+
+Describe 'Setup token handoff' {
+    BeforeAll {
+        function Invoke-FixtureAgent {
+            $script:SetupArguments = @($args)
+            $script:SetupTokenSeen = [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process')
+            $global:LASTEXITCODE = $script:SetupExit
+        }
+    }
+
+    BeforeEach {
+        $script:PreviousSetupToken = [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process')
+        [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $null, 'Process')
+        $script:SetupExit = 0
+        $script:SetupTokenSeen = $null
+        $script:SetupArguments = @()
+    }
+
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $script:PreviousSetupToken, 'Process')
+    }
+
+    It 'uses a temporary environment rather than agent arguments and clears it on success' {
+        Invoke-DbAgentSetup -Path Invoke-FixtureAgent -Config 'C:\private data\config.yaml' -AuthToken 'ark_tk_setup_fixture'
+        $script:SetupTokenSeen | Should -BeExactly 'ark_tk_setup_fixture'
+        $script:SetupArguments.Count | Should -Be 3
+        $script:SetupArguments[0] | Should -BeExactly 'install'
+        $script:SetupArguments[1] | Should -BeExactly '--config'
+        $script:SetupArguments[2] | Should -BeExactly 'C:\private data\config.yaml'
+        [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process') | Should -BeNullOrEmpty
+    }
+
+    It 'clears the temporary token if setup fails without exposing it in the error' {
+        $script:SetupExit = 9
+        { Invoke-DbAgentSetup -Path Invoke-FixtureAgent -AuthToken 'ark_tk_setup_fixture' } | Should -Throw '*exit code 9*'
+        [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process') | Should -BeNullOrEmpty
+    }
+
+    It 'restores an existing environment after overriding it for this setup' {
+        [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'previous-fixture', 'Process')
+        Invoke-DbAgentSetup -Path Invoke-FixtureAgent -AuthToken 'argument-fixture'
+        $script:SetupTokenSeen | Should -BeExactly 'argument-fixture'
+        [Environment]::GetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', 'Process') | Should -BeExactly 'previous-fixture'
     }
 }
 

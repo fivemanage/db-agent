@@ -43,6 +43,37 @@ download() {
 }
 
 main() {
+  local auth_token='' auth_supplied=false
+  local -a setup_args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --auth)
+        [ "$auth_supplied" = false ] || die "Supply --auth only once."
+        if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" == --* ]]; then
+          die "--auth requires a setup token."
+        fi
+        auth_token="$2"
+        auth_supplied=true
+        shift 2
+        ;;
+      --auth=*)
+        [ "$auth_supplied" = false ] || die "Supply --auth only once."
+        auth_token="${1#--auth=}"
+        [ -n "$auth_token" ] || die "--auth requires a setup token."
+        auth_supplied=true
+        shift
+        ;;
+      --)
+        setup_args+=("$@")
+        break
+        ;;
+      *)
+        setup_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
   [ "$(uname -s)" = Linux ] || die "This installer supports Linux only; Windows needs PowerShell."
   case "$(uname -m)" in
     x86_64|amd64) arch=amd64 ;;
@@ -76,7 +107,7 @@ main() {
   [ ! -e "$executable" ] && [ ! -L "$executable" ] \
     || die "An installation already exists. Resume with /opt/db-agent/db-agent install or use its signed update command; this script will not overwrite it."
   interactive=true
-  for argument do
+  for argument in "${setup_args[@]}"; do
     if [ "$argument" = --service-only ]; then interactive=false; fi
   done
   if [ "$interactive" = true ]; then
@@ -137,10 +168,14 @@ main() {
   sync -f /opt/db-agent
   cleanup
   printf 'Verified db-agent %s installed at %s. Starting setup; service startup is not proof of a completed backup.\n' "$version" "$executable"
+  # Only the verified setup receives the token, not download/version subprocesses
+  # or the agent's CLI arguments. The agent consumes and clears this environment.
+  if [ "$auth_supplied" = true ]; then export DB_AGENT_SETUP_TOKEN="$auth_token"; fi
+  unset auth_token
   if [ "$interactive" = true ]; then
-    exec "$executable" install "$@" </dev/tty
+    exec "$executable" install "${setup_args[@]}" </dev/tty
   else
-    exec "$executable" install "$@"
+    exec "$executable" install "${setup_args[@]}"
   fi
 }
 

@@ -88,8 +88,10 @@ class InstallerTest(unittest.TestCase):
         self.artifact = b"""#!/bin/sh
 touch /tmp/agent-executed
 if [ "$1" = version ]; then
+  if [ -n "${FIXTURE_EXPECTED_AUTH:-}" ] && [ -n "${DB_AGENT_SETUP_TOKEN:-}" ]; then exit 21; fi
   printf '1.2.3\\n'
 elif [ "$1" = install ]; then
+  if [ -n "${FIXTURE_EXPECTED_AUTH:-}" ] && [ "${DB_AGENT_SETUP_TOKEN:-}" != "$FIXTURE_EXPECTED_AUTH" ]; then exit 22; fi
   printf '%s\\n' "$@" > /tmp/agent-arguments
   if [ "${FIXTURE_SETUP_EXIT:-0}" != 0 ]; then
     echo 'fixture setup failed; saved state preserved' >&2
@@ -166,6 +168,38 @@ fi
             self.assertEqual(EXECUTABLE.read_bytes(), self.artifact)
         finally:
             hidden.rename(interpreter)
+
+    def test_auth_argument_reaches_only_verified_setup_without_becoming_agent_arguments(self):
+        token = "ark_tk_literal_'_$(never-evaluate);_fixture"
+        for auth_args in (["--auth", token], ["--auth=" + token]):
+            with self.subTest(auth_args=auth_args[:1]):
+                self.clean_installation()
+                os.mkdir("/etc/db-agent", 0o700)
+                for name, contents in self.saved.items():
+                    path = pathlib.Path("/etc/db-agent", name)
+                    path.write_bytes(contents)
+                    path.chmod(0o600)
+                result = self.run_installer(
+                    args=[*auth_args, "--service-only", "--config", "/etc/db-agent/config.yaml"],
+                    environment=dict(self.environment, FIXTURE_EXPECTED_AUTH=token))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(ARGUMENTS.read_text().splitlines(),
+                                 ["install", "--service-only", "--config", "/etc/db-agent/config.yaml"])
+                self.assertNotIn(token.encode(), result.stdout + result.stderr)
+                self.assertEqual(EXECUTABLE.read_bytes(), self.artifact)
+
+    def test_missing_or_duplicate_auth_arguments_fail_before_network_without_echoing_tokens(self):
+        token = "ark_tk_never_echo_this_fixture"
+        for args in (["--auth"], ["--auth", ""], ["--auth", "--service-only"],
+                     ["--auth="], ["--auth", token, "--auth", token],
+                     ["--auth=" + token, "--auth=" + token]):
+            with self.subTest(args=args[:1]):
+                result = self.run_installer(args=args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"--auth", result.stderr)
+                self.assertNotIn(token.encode(), result.stdout + result.stderr)
+                self.assertEqual(self.requests, [])
+                self.assertFalse(EXECUTED.exists())
 
     def test_bad_signature_does_not_fetch_or_execute_artifact(self):
         type(self).signature = base64.b64encode(bytes(64))
