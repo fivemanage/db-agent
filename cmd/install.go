@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/fivemanage/db-agent/internal/config"
-	"github.com/fivemanage/db-agent/internal/diagnostic"
 	"github.com/fivemanage/db-agent/internal/enrollment"
 	services "github.com/fivemanage/db-agent/internal/service"
 	"github.com/spf13/cobra"
@@ -42,9 +41,8 @@ var installCmd = &cobra.Command{
 		}
 
 		output := newSetupOutput(cmd.OutOrStdout())
-		output.title("FiveManage database backups", "Connect this server in a few quick steps. Database logins stay on this machine.")
-		output.warn("Turn off terminal recording first. Your recovery key is shown once.")
-		output.step(1, 5, "Connect to FiveManage")
+		output.title("FiveManage database backups", "Connect this server here, then finish setup in your dashboard.")
+		output.step(1, 3, "Connect to FiveManage")
 
 		settings, err := ensureEnrollment(cmd.Context(), path, installAPIURL, func() (string, error) {
 			if setupToken != "" {
@@ -75,55 +73,51 @@ var installCmd = &cobra.Command{
 		}
 
 		output.ok("Connected to FiveManage")
-		output.step(2, 5, "Connect your database")
-		if settings.Database.Validate() == nil && len(settings.Database.Databases) > 0 {
-			output.ok("Using your saved database settings")
-			output.note("To change them, run db-agent configure")
-			if err := configureInstallRestoreAccess(cmd, bufio.NewReader(cmd.InOrStdin()), config.DatabaseConfig{}); err != nil {
-				return err
-			}
-		} else if err := configureLocalDatabase(cmd, settings.Database, true); err != nil {
-			return err
-		}
 
-		output.step(3, 5, "Save your recovery key")
-		if err := configureRecoveryKey(cmd, path); err != nil {
-			output.fail("Recovery key setup isn't finished. Your existing key is kept.")
-			output.note("Resume with db-agent configure --key")
-			return err
-		}
-
-		output.step(4, 5, "Check everything")
-		settings, err = config.LoadDiagnostic(path)
-		if err != nil {
-			return fmt.Errorf("database settings were saved, but prerequisites could not be checked: %w; retry with db-agent test", err)
-		}
-		stop := output.spin("Checking database, backup tools, recovery key, and FiveManage")
-		checks := diagnostic.Run(cmd.Context(), settings)
-		stop()
-		if !checksPassed(checks) {
-			printFailedChecks(cmd.OutOrStdout(), checks)
-			output.fail("Some checks failed, so the backup service wasn't started.")
-			output.note("Your progress is saved. Fix the issues above, then run db-agent install again.")
-			return errors.New("setup incomplete: prerequisites failed; service was not installed or started; no working backup exists yet")
-		}
-		output.ok(fmt.Sprintf("All %d checks passed", len(checks)))
-
-		output.step(5, 5, "Start the backup service")
-		stop = output.spin("Installing and starting the service")
+		// The service starts before the database prompts, so closing this
+		// terminal leaves an agent the dashboard can still see and finish.
+		output.step(2, 3, "Start the backup service")
+		stop := output.spin("Installing and starting the service")
 		messages, err := serviceActions(path, services.NewController, "install", "start")
 		stop()
 		for _, message := range messages {
 			output.ok(message)
 		}
+		if err == nil {
+			stop = output.spin("Checking that the service keeps running")
+			err = verifyService(cmd.Context(), path, services.NewController)
+			stop()
+		}
 		if err != nil {
-			output.fail("The service didn't start. Your settings and recovery key are saved.")
+			output.fail("The service isn't running. Your registration is saved; fix the problem, then run db-agent install again.")
+			return err
+		}
+		output.ok("Service is running")
+
+		output.step(3, 3, "Connect your database")
+		output.note("Your database login is saved on this server only.")
+		if settings.Database.Validate() == nil && len(settings.Database.Databases) > 0 {
+			output.ok("Using your saved database settings")
+			output.note("To change them, run db-agent configure")
+			err = configureInstallRestoreAccess(cmd, bufio.NewReader(cmd.InOrStdin()), config.DatabaseConfig{})
+		} else {
+			err = configureLocalDatabase(cmd, settings.Database, true)
+		}
+		if err != nil {
+			output.note("The agent is running. Finish the database connection with db-agent configure.")
 			return err
 		}
 
-		output.section("You're all set")
-		output.info("Your first backup starts in the background.")
-		output.note("Check it in the dashboard or with db-agent status")
+		if current, err := config.LoadDiagnostic(path); err == nil && current.Validate() == nil {
+			output.section("You're all set")
+			output.info("Setup is already finished. Check backups in the dashboard or with db-agent status.")
+			return nil
+		}
+
+		output.section("Finish setup in your dashboard")
+		output.info("Go back to the database page in the FiveManage dashboard to save your recovery key and start the first backup.")
+		output.note(fmt.Sprintf("Dashboard: %s", displayText(settings.APIURL)))
+		output.note("You can close this terminal.")
 		return nil
 	},
 }

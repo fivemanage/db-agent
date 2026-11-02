@@ -64,16 +64,24 @@ Release builds can include the FiveManage API URL. Development builds require
 
 ### What setup asks for
 
-Turn off terminal recording and PowerShell transcripts before setup, since it
-displays your recovery key.
-
-1. Enter the dashboard setup token.
+1. Enter the dashboard setup token. The agent registers and starts its service
+   right away, so the dashboard can see it even if you close the terminal later.
 2. Paste your database connection string or enter the details manually. If you
    connect with an admin login, setup offers to create a read-only backup user
-   for you. Otherwise, use an existing backup login. Database administrator
-   credentials are never saved.
-3. Save the recovery key in a password manager or offline storage, then confirm
-   your copy. The key is shown only once.
+   for you. Otherwise, use an existing backup login. Database logins are saved on
+   this server only, and database administrator credentials are never saved.
+3. Optionally create a restore user for dashboard restores.
+
+Then go back to the database page in the dashboard to finish setup. The
+dashboard shows where the recovery key file is and how to view it. Save a copy
+of the key in a password manager or other storage off this server, confirm that
+you saved it, and select **Finish setup**. The agent checks database access, dump
+tools, the recovery key, and API connectivity. If every check passes, it starts
+the first backup without a restart. If a check fails, the dashboard lists it;
+fix it on the server and try again.
+
+To finish in the terminal instead, run `configure --key`. It asks you to paste
+the key from the file to confirm your copy.
 
 After you generate a setup token, the dashboard's copyable install command can
 pass it directly to setup, so you don't need to paste it a second time. That
@@ -84,9 +92,6 @@ The installers accept `--auth '<setup-token>'` on Linux or
 environment variable, not through agent arguments. The agent clears that variable
 before starting child processes and saves only the issued agent credential,
 never the setup token. Omitting the argument keeps the hidden token prompt.
-
-Setup then checks database access, dump tools, the recovery key, and API
-connectivity before installing and starting the service.
 
 Supported connection-string forms include:
 
@@ -105,17 +110,17 @@ and can create databases and database users, so keep this machine's database
 admin access protected. You can skip this step and enable restores later by
 rerunning `install`.
 
-If setup is interrupted, rerun `install` with the same config. It keeps your
-registration, database settings, and recovery key. Do not delete a key or pending
-enrollment file to retry. An existing key is never regenerated or redisplayed;
-if its initial display was lost, an authorized local administrator must save a
-copy of the protected key file before confirming it.
+If setup is interrupted, rerun `install` with the same config, or run
+`configure` to enter the database login again. Both keep your registration,
+database settings, and recovery key. Do not delete a key or pending enrollment
+file to retry. An existing key is never regenerated.
 
 ## Backups and status
 
-On first startup, the service attempts a backup once its checks pass. Setup
-doesn't wait for the upload to finish. Check the result in the dashboard or with
-`status`; a running service alone doesn't mean you have a completed backup.
+The service attempts the first backup once setup is finished and its checks
+pass. Setup doesn't wait for the upload to finish. Check the result in the
+dashboard or with `status`; a running service alone doesn't mean you have a
+completed backup.
 
 Examples below use `db-agent` on your PATH. On Windows, use `db-agent.exe`; on
 Linux, run these commands as root. Add `--config <path>` if your install

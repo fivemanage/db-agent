@@ -61,6 +61,18 @@ func serviceActions(path string, factory func(*manager.Config) (services.Control
 	return messages, nil
 }
 
+func verifyService(ctx context.Context, path string, factory func(*manager.Config) (services.Controller, error)) error {
+	cfg, err := services.Config(path)
+	if err != nil {
+		return err
+	}
+	svc, err := factory(cfg)
+	if err != nil {
+		return err
+	}
+	return services.WaitStarted(ctx, svc)
+}
+
 var serviceRunCmd = &cobra.Command{
 	Use:    "service-run",
 	Short:  "Run under the OS service manager",

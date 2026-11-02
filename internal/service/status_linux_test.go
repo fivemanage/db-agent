@@ -30,3 +30,17 @@ func TestSystemdStatesDoNotConfuseFailedWithMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemdRunningExcludesRestartLoops(t *testing.T) {
+	for output, want := range map[string]bool{
+		"ActiveState=active\nSubState=running\n":          true,
+		"ActiveState=activating\nSubState=auto-restart\n": false,
+		"ActiveState=activating\nSubState=start\n":        false,
+		"ActiveState=failed\nSubState=failed\n":           false,
+		"ActiveState=active\nSubState=exited\n":           false,
+	} {
+		if got := systemdRunning(output); got != want {
+			t.Fatalf("%q: running=%v, want %v", output, got, want)
+		}
+	}
+}

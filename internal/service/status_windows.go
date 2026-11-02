@@ -47,6 +47,20 @@ func (w windowsController) Status() (manager.Status, error) {
 	return windowsStatus(status.State)
 }
 
+func running(Controller) (bool, error) {
+	m, s, err := openWindowsService()
+	if err != nil {
+		return false, err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	status, err := s.Query()
+	if err != nil {
+		return false, err
+	}
+	return status.State == svc.Running, nil
+}
+
 func windowsStatus(state svc.State) (manager.Status, error) {
 	switch state {
 	case svc.Running, svc.StartPending:

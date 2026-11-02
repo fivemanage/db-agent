@@ -28,7 +28,24 @@ func (s systemdController) Status() (manager.Status, error) {
 	return systemdStatus(string(output))
 }
 
-func systemdStatus(output string) (manager.Status, error) {
+func running(Controller) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "systemctl", "show", Name+".service", "--property=ActiveState,SubState").Output()
+	if err != nil {
+		return false, fmt.Errorf("query systemd service: %w", err)
+	}
+	return systemdRunning(string(output)), nil
+}
+
+// systemdRunning excludes "activating" states, unlike systemdStatus: a
+// crashing service waits in activating/auto-restart between restart attempts.
+func systemdRunning(output string) bool {
+	fields := systemdFields(output)
+	return fields["ActiveState"] == "active" && fields["SubState"] == "running"
+}
+
+func systemdFields(output string) map[string]string {
 	fields := make(map[string]string)
 	for _, line := range strings.Split(output, "\n") {
 		key, value, ok := strings.Cut(line, "=")
@@ -36,6 +53,11 @@ func systemdStatus(output string) (manager.Status, error) {
 			fields[key] = value
 		}
 	}
+	return fields
+}
+
+func systemdStatus(output string) (manager.Status, error) {
+	fields := systemdFields(output)
 	if fields["LoadState"] == "not-found" {
 		return manager.StatusUnknown, manager.ErrNotInstalled
 	}
