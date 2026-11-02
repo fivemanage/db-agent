@@ -65,8 +65,12 @@ func TestProvisionedLocalAccountCanDump(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.ExecContext(ctx, "DROP USER "+backupAccount)
-	defer db.ExecContext(ctx, "DROP USER 'db_agent_backup'@'127.0.0.1'")
+	defer db.ExecContext(ctx, "DROP USER 'db_agent_backup'@'"+r.ClientHost+"'")
+	var count int
+	var host string
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*), MIN(Host) FROM mysql.user WHERE User = 'db_agent_backup'").Scan(&count, &host); err != nil || count != 1 || host != r.ClientHost {
+		t.Fatalf("expected one backup account for the observed host, got count=%d host=%q err=%v", count, host, err)
+	}
 	// Rerunning creation must not change the existing account or invoke save.
 	if err := ProvisionBackupAccount(ctx, admin, r.Driver, r.Version, r.ClientHost, func(config.DatabaseConfig) error { t.Fatal("existing account was replaced"); return nil }); err == nil {
 		t.Fatal("existing account creation accepted")

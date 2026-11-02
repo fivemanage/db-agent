@@ -56,11 +56,10 @@ func BackupAccountSQL(driver, version string, databases []string) ([]string, err
 	return append(statements, "GRANT "+routine+" TO "+backupAccount), nil
 }
 
-// LocalBackupAccountSQL keeps the destination local while using the client host
-// seen by the server, which can be a bridge address for a containerized database.
+// LocalBackupAccountSQL creates one identity for the client host seen by the
+// server, which can be a bridge address for a containerized database.
 func LocalBackupAccountSQL(driver, version string, databases []string, host, clientHost string) ([]string, error) {
-	ip, err := localTCPHost(host)
-	if err != nil {
+	if _, err := localTCPHost(host); err != nil {
 		return nil, err
 	}
 	if err := validateClientHost(clientHost); err != nil {
@@ -70,24 +69,15 @@ func LocalBackupAccountSQL(driver, version string, databases []string, host, cli
 	if err != nil {
 		return nil, err
 	}
-	var all []string
-	clientIP := net.ParseIP(clientHost)
-	if strings.EqualFold(clientHost, "localhost") || clientIP != nil && clientIP.IsLoopback() {
-		// Preserve both native local identities for name-resolution differences.
-		all = append(all, statements...)
-		if strings.EqualFold(clientHost, "localhost") {
-			clientHost = ip
-		}
-	}
 	account := "'db_agent_backup'@'" + clientHost + "'"
-	for _, statement := range statements {
+	for i, statement := range statements {
 		if strings.HasPrefix(statement, "CREATE USER ") {
-			all = append(all, "CREATE USER "+account+" IDENTIFIED BY '<generated password>'")
+			statements[i] = "CREATE USER " + account + " IDENTIFIED BY '<generated password>'"
 		} else {
-			all = append(all, strings.TrimSuffix(statement, backupAccount)+account)
+			statements[i] = strings.TrimSuffix(statement, backupAccount) + account
 		}
 	}
-	return all, nil
+	return statements, nil
 }
 
 func readClientHost(ctx context.Context, db accountExecutor) (string, error) {
@@ -203,7 +193,7 @@ func provisionAccount(ctx context.Context, db accountExecutor, admin config.Data
 			if isCreate {
 				// A lost response may mean CREATE succeeded. Never drop this
 				// identity unless this call positively knows it created it.
-				failure = errors.New("could not create the approved db_agent_backup identities; check CREATE USER privileges and whether an account already exists. Existing accounts are never changed; use an existing backup account or ask a local administrator to inspect it")
+				failure = errors.New("could not create the approved db_agent_backup account; check CREATE USER privileges and whether an account already exists. Existing accounts are never changed; use an existing backup account or ask a local administrator to inspect it")
 			} else {
 				failure = errors.New("could not grant backup access; ask a local administrator for grant authority on the selected schemas and routine visibility, or use an existing backup account")
 			}
@@ -231,7 +221,7 @@ func provisionAccount(ctx context.Context, db accountExecutor, admin config.Data
 		}
 	}
 	if incomplete {
-		return fmt.Errorf("%w; cleanup failed: ask a local administrator to inspect the newly created db_agent_backup identities before retrying", failure)
+		return fmt.Errorf("%w; cleanup failed: ask a local administrator to inspect the newly created db_agent_backup account before retrying", failure)
 	}
-	return fmt.Errorf("%w; the backup identities confirmed created by this attempt were removed; retry setup or use an existing account", failure)
+	return fmt.Errorf("%w; the backup account confirmed created by this attempt was removed; retry setup or use an existing account", failure)
 }
