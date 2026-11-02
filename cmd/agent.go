@@ -62,10 +62,9 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 		return nil
 	}
 
-	state := startupHeartbeatState(checks.Checks)
-	if checks.Driver != "" && checks.Version != "" {
-		state.DatabaseMetadata = controlplane.DatabaseMetadata{Driver: checks.Driver, Version: checks.Version}
-	}
+	readiness := &heartbeatReadiness{}
+	readiness.set(checks)
+	startupReady := readiness.get().Status == controlplane.Idle
 
 	client.OnOverrides = func(ctx context.Context, overrides config.DashboardOverrides) error {
 		return applyAgentOverrides(ctx, path, scheduler, overrides)
@@ -83,13 +82,18 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	return runAgent(ctx, output, errorOutput, agentWork{
 		heartbeats: func(ctx context.Context, report func(controlplane.Result)) error {
 			return runHeartbeatTransfers(ctx, func(ctx context.Context, report func(controlplane.Result)) error {
-				return client.RunHeartbeat(ctx, func() controlplane.State { return runner.HeartbeatState(state) }, report)
+				return client.RunHeartbeat(ctx, func() controlplane.State { return runner.HeartbeatState(readiness.get()) }, report)
 			}, runner.Resume, report, errorOutput)
 		},
 		backups: func(ctx context.Context) error {
-			return runScheduledBackups(ctx, path, scheduler, runner, client, state.Status == controlplane.Idle, output, errorOutput)
+			return runScheduledBackups(ctx, path, scheduler, runner, client, startupReady, output, errorOutput)
 		},
 		restores: restores.Run,
+		setup: func(ctx context.Context) error {
+			return runDashboardSetup(ctx, path, client, setupPollInterval, func(ctx context.Context) {
+				finishDashboardSetup(ctx, path, client, readiness, output, errorOutput)
+			}, errorOutput)
+		},
 		update: func(ctx context.Context) (bool, error) {
 			effective, err := config.LoadAgent(path)
 			if err != nil || !effective.AutoUpdate {
@@ -117,7 +121,31 @@ type agentWork struct {
 	heartbeats func(context.Context, func(controlplane.Result)) error
 	backups    func(context.Context) error
 	restores   func(context.Context) error
+	setup      func(context.Context) error
 	update     func(context.Context) (bool, error)
+}
+
+// heartbeatReadiness starts from the startup diagnostics and is refreshed when
+// dashboard setup completes, so a finished setup is reported without a restart.
+type heartbeatReadiness struct {
+	mu    sync.Mutex
+	state controlplane.State
+}
+
+func (r *heartbeatReadiness) set(report diagnostic.Report) {
+	state := startupHeartbeatState(report.Checks)
+	if report.Driver != "" && report.Version != "" {
+		state.DatabaseMetadata = controlplane.DatabaseMetadata{Driver: report.Driver, Version: report.Version}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state = state
+}
+
+func (r *heartbeatReadiness) get() controlplane.State {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state
 }
 
 type updateResult struct {
@@ -150,6 +178,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 	heartbeatDone := make(chan error, 1)
 	backupDone := make(chan error, 1)
 	restoreDone := make(chan error, 1)
+	setupDone := make(chan error, 1)
 	updates := make(chan updateResult, 1)
 
 	workers.Add(1)
@@ -168,6 +197,7 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 	updaterStarted := false
 	backupsStarted := false
 	restoresStarted := false
+	setupStarted := false
 	fmt.Fprintln(output, "Agent started. A heartbeat confirms connectivity, not a completed backup.")
 
 	for {
@@ -206,6 +236,11 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 				workers.Add(1)
 				go func() { defer workers.Done(); restoreDone <- work.restores(ctx) }()
 			}
+			if !setupStarted && work.setup != nil && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
+				setupStarted = true
+				workers.Add(1)
+				go func() { defer workers.Done(); setupDone <- work.setup(ctx) }()
+			}
 			if autoUpdate && !updaterStarted && (result.Connection == controlplane.Connected || result.Connection == controlplane.Unreachable) {
 				updaterStarted = true
 				workers.Add(1)
@@ -225,6 +260,14 @@ func runAgent(ctx context.Context, output, errorOutput io.Writer, work agentWork
 					fmt.Fprintf(errorOutput, "Restore delivery stopped: %v\n", err)
 				}
 				fmt.Fprintln(errorOutput, "Restore delivery is unavailable; backup and heartbeat workers continue. Check local restore access/state and restart the service after resolving it.")
+			}
+		case err := <-setupDone:
+			if errors.Is(err, controlplane.ErrCredentialRejected) {
+				return err
+			}
+			if err != nil && ctx.Err() == nil {
+				fmt.Fprintf(errorOutput, "Dashboard setup stopped: %v\n", err)
+				fmt.Fprintln(errorOutput, "Backup and heartbeat workers continue. Finish setup with db-agent configure --key, or restart the service to retry dashboard setup.")
 			}
 		case result := <-updates:
 			if result.err != nil {

@@ -222,12 +222,12 @@ func TestInstallShowsOnlyEnrollmentStageOnEarlyFailure(t *testing.T) {
 		t.Fatal("invalid API URL accepted")
 	}
 	text := output.String()
-	for _, want := range []string{"FiveManage database backups", "[1/5] Connect to FiveManage", "x Couldn't connect to FiveManage."} {
+	for _, want := range []string{"FiveManage database backups", "[1/3] Connect to FiveManage", "x Couldn't connect to FiveManage."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing setup feedback %q", want)
 		}
 	}
-	for _, unwanted := range []string{"[2/5]", "[3/5]", "[4/5]", "[5/5]", "all set", "+ ", "\x1b"} {
+	for _, unwanted := range []string{"[2/3]", "[3/3]", "Finish setup in your dashboard", "+ ", "\x1b"} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("early failure emitted %q", unwanted)
 		}
