@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -54,7 +55,9 @@ func runBackupNow(ctx context.Context, path string, client *controlplane.Client)
 }
 
 func reportAutomaticBackup(err error, output, errorOutput io.Writer) {
-	if err != nil {
+	if errors.Is(err, backup.ErrConfirmationQueued) {
+		fmt.Fprintln(output, "Encrypted backup uploaded; waiting to confirm completion. The agent will retry automatically.")
+	} else if err != nil {
 		fmt.Fprintln(errorOutput, "Automatic backup skipped or failed; check db-agent status and run db-agent test.")
 	} else {
 		fmt.Fprintln(output, "Automatic backup uploaded and completion acknowledged.")

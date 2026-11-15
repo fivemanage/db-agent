@@ -27,6 +27,7 @@ const (
 	DatabaseUnavailable Problem = "database_unavailable"
 	BackupFailed        Problem = "backup_failed"
 	UploadFailed        Problem = "upload_failed"
+	CompletionFailed    Problem = "completion_failed"
 )
 
 type State struct {
@@ -68,6 +69,8 @@ func (s State) payload(version string) (heartbeatRequest, error) {
 		payload.LastError = "Backup failed; check local agent logs and backup prerequisites before retrying."
 	case UploadFailed:
 		payload.LastError = "Encrypted backup upload failed; check outbound network access and local agent logs before retrying."
+	case CompletionFailed:
+		payload.LastError = "Encrypted backup uploaded, but completion could not be confirmed; check agent access and local agent logs before retrying."
 	default:
 		return heartbeatRequest{}, errors.New("heartbeat problems must be classified; raw error messages are not accepted")
 	}
@@ -93,10 +96,12 @@ type Result struct {
 func (c *Client) RunHeartbeat(ctx context.Context, current func() State, report func(Result)) error {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
-	return c.runHeartbeat(ctx, current, report, ticker.C)
+	changes := time.NewTicker(time.Second)
+	defer changes.Stop()
+	return c.runHeartbeat(ctx, current, report, ticker.C, changes.C)
 }
 
-func (c *Client) runHeartbeat(ctx context.Context, current func() State, report func(Result), ticks <-chan time.Time) error {
+func (c *Client) runHeartbeat(ctx context.Context, current func() State, report func(Result), ticks, changes <-chan time.Time) error {
 	if current == nil {
 		return errors.New("heartbeat requires a current-state source")
 	}
@@ -104,7 +109,8 @@ func (c *Client) runHeartbeat(ctx context.Context, current func() State, report 
 		if ctx.Err() != nil {
 			return nil
 		}
-		err := c.Heartbeat(ctx, current())
+		state := current()
+		err := c.Heartbeat(ctx, state)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -126,12 +132,24 @@ func (c *Client) runHeartbeat(ctx context.Context, current func() State, report 
 				return err
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case _, ok := <-ticks:
-			if !ok {
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
 				return nil
+			case _, ok := <-ticks:
+				if !ok {
+					return nil
+				}
+				break wait
+			case _, ok := <-changes:
+				if !ok {
+					changes = nil
+				} else if current() != state {
+					// Use the same worker so a stale in-flight heartbeat cannot
+					// arrive after the transition and overwrite its newer state.
+					break wait
+				}
 			}
 		}
 	}

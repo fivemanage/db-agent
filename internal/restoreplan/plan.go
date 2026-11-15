@@ -64,6 +64,7 @@ type Plan struct {
 	statements  []plannedStatement
 	tables      []Table
 	views       []View
+	triggers    []Trigger
 	bytes       int64
 	maxBytes    int64
 	destination string
@@ -100,6 +101,8 @@ func (p *Plan) Views() []View {
 	}
 	return views
 }
+
+func (p *Plan) Triggers() []Trigger { return append([]Trigger(nil), p.triggers...) }
 
 func (p *Plan) add(statements ...string) error {
 	for _, statement := range statements {
@@ -179,6 +182,9 @@ type builder struct {
 	current             plannedStatement
 	autocommitBlock     bool
 	autocommitCommitted bool
+	triggers            map[string]*triggerPlan
+	triggerDrops        map[string]bool
+	sqlMode             *string
 }
 
 type tablePlan struct {
@@ -214,10 +220,11 @@ func prepare(ctx context.Context, input io.Reader, backing io.ReaderAt, options 
 		return nil, ErrUnsupported
 	}
 	b := &builder{options: options, input: backing, tables: make(map[string]*tablePlan), dropped: make(map[string]bool),
-		views: make(map[string]*viewPlan), stubs: make(map[string]*viewStub), viewDrops: make(map[string]bool)}
+		views: make(map[string]*viewPlan), stubs: make(map[string]*viewStub), viewDrops: make(map[string]bool),
+		triggers: make(map[string]*triggerPlan), triggerDrops: make(map[string]bool)}
 	ordinal := 0
-	err = scanStatements(ctx, input, options, func(raw string, offset int64) error {
-		statements, err := split(ctx, raw, options)
+	err = scanStatements(ctx, input, options, func(raw string, offset int64, delimiter string) error {
+		statements, err := splitFrame(ctx, raw, options, delimiter)
 		if err != nil {
 			return fmt.Errorf("SQL framing rejected: %w", err)
 		}
@@ -226,10 +233,23 @@ func prepare(ctx context.Context, input io.Reader, backing io.ReaderAt, options 
 			if ordinal > options.MaxStatements {
 				return ErrLimit
 			}
+			if handled, err := b.triggerStatement(parser, statement); handled || err != nil {
+				if err != nil {
+					return fmt.Errorf("SQL statement %d trigger rejected: %w", ordinal, err)
+				}
+				continue
+			}
 			node, err := parser.ParseStrictDDL(statement)
 			if err != nil {
 				// Parser diagnostics contain raw SQL, including customer data.
 				return fmt.Errorf("SQL statement %d cannot be parsed completely: %w", ordinal, ErrUnsupported)
+			}
+			if delimiter != ";" {
+				// Only trigger bodies and native session bookkeeping use custom
+				// framing. Retained row frames always use standard SQL framing.
+				if _, ok := node.(*sqlparser.Set); !ok {
+					return ErrUnsupported
+				}
 			}
 			b.current = plannedStatement{offset: offset, size: len(raw)}
 			if backing != nil {
@@ -506,6 +526,9 @@ func (b *builder) finish() (*Plan, error) {
 		return nil, ErrLimit
 	}
 	if err := b.finishViews(plan); err != nil {
+		return nil, err
+	}
+	if err := b.finishTriggers(plan); err != nil {
 		return nil, err
 	}
 	return plan, nil

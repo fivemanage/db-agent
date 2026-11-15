@@ -24,7 +24,7 @@ func TestRestoreAuthorityRequiresOnlyExplicitScopedDirectGrants(t *testing.T) {
 	if !restoreAuthorityGrants(authorityGrants()) {
 		t.Fatal("expected narrowly scoped provisioning grants were rejected")
 	}
-	for _, scenario := range []string{"missing_create_user", "missing_grant_option", "global_all", "source_read", "wildcard_scope", "global_grant_option", "role", "extra_namespace_privilege", "missing_view_privilege"} {
+	for _, scenario := range []string{"missing_create_user", "missing_grant_option", "global_all", "source_read", "wildcard_scope", "global_grant_option", "role", "extra_namespace_privilege", "missing_view_privilege", "missing_trigger_privilege"} {
 		t.Run(scenario, func(t *testing.T) {
 			grants := authorityGrants()
 			switch scenario {
@@ -46,6 +46,8 @@ func TestRestoreAuthorityRequiresOnlyExplicitScopedDirectGrants(t *testing.T) {
 				grants[2] = strings.Replace(grants[2], "GRANT ", "GRANT DROP, ", 1)
 			case "missing_view_privilege":
 				grants[2] = strings.Replace(grants[2], ", CREATE VIEW", "", 1)
+			case "missing_trigger_privilege":
+				grants[2] = strings.Replace(grants[2], ", TRIGGER", "", 1)
 			}
 			if restoreAuthorityGrants(grants) {
 				t.Fatal("unsafe or insufficient restore authority was accepted")

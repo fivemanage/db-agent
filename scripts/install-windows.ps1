@@ -187,6 +187,72 @@ function Receive-DbAgentFile {
     }
 }
 
+function Open-DbAgentEnvironmentKey {
+    param([switch]$Writable)
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', [bool]$Writable)
+    if ($null -eq $key) { throw 'The system environment settings could not be opened.' }
+    return $key
+}
+
+function Get-DbAgentMachinePath {
+    $key = Open-DbAgentEnvironmentKey
+    try { return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Dispose() }
+}
+
+function Set-DbAgentMachinePath {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'PATH registration is an internal step of the explicitly invoked installer.')]
+    [CmdletBinding()]
+    param([string]$Value)
+    $key = Open-DbAgentEnvironmentKey -Writable
+    try {
+        # [Environment]::SetEnvironmentVariable would store expanded REG_SZ,
+        # permanently flattening entries such as %SystemRoot%.
+        $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } finally { $key.Dispose() }
+    # Explorer rereads the system environment only after this broadcast; without
+    # it, newly opened terminals miss the change until the next sign-in.
+    $broadcast = 'DbAgent.EnvironmentBroadcast' -as [type]
+    if ($null -eq $broadcast) {
+        $broadcast = Add-Type -Namespace DbAgent -Name EnvironmentBroadcast -PassThru -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+'@
+    }
+    $result = [UIntPtr]::Zero
+    [void]$broadcast::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+}
+
+function Test-DbAgentPathEntry {
+    param([string]$PathValue, [string]$Directory)
+    $target = $Directory.TrimEnd('\')
+    foreach ($entry in ($PathValue -split ';')) {
+        $candidate = [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\')
+        if ($candidate -and $candidate -ieq $target) { return $true }
+    }
+    return $false
+}
+
+function Add-DbAgentPath {
+    param([string]$Directory)
+    try {
+        $machine = Get-DbAgentMachinePath
+        if (-not (Test-DbAgentPathEntry $machine $Directory)) {
+            # Appending keeps existing system commands first. Callers verify the
+            # directory is writable only by SYSTEM and Administrators.
+            Set-DbAgentMachinePath ((@($machine.TrimEnd(';'), $Directory) | Where-Object { $_ }) -join ';')
+            Write-Information "Added $Directory to the system PATH. Reopen any other terminals to run db-agent from any folder." -InformationAction Continue
+        }
+    } catch {
+        Write-Warning "db-agent could not be added to the system PATH. Add $Directory to PATH manually, or run & '$($Directory.TrimEnd('\'))\db-agent.exe' <command>."
+        return
+    }
+    $process = [string]$env:Path
+    if (-not (Test-DbAgentPathEntry $process $Directory)) {
+        $env:Path = (@($process.TrimEnd(';'), $Directory) | Where-Object { $_ }) -join ';'
+    }
+}
+
 function Invoke-DbAgentSetup {
     param([string]$Path, [switch]$ServiceOnly, [string]$Config, [string]$AuthToken)
     $arguments = @('install')
@@ -197,7 +263,7 @@ function Invoke-DbAgentSetup {
         if ($AuthToken) { [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $AuthToken, 'Process') }
         & $Path @arguments
         if ($LASTEXITCODE -ne 0) {
-            throw "Setup did not finish (exit code $LASTEXITCODE). The verified binary and saved config/key remain. Resume with db-agent.exe install."
+            throw "Setup did not finish (exit code $LASTEXITCODE). The verified binary and saved config/key remain. Resume with db-agent install."
         }
     } finally {
         [Environment]::SetEnvironmentVariable('DB_AGENT_SETUP_TOKEN', $previousToken, 'Process')
@@ -222,7 +288,9 @@ function Invoke-DbAgentInstall {
     $installDirectory = Join-Path $programFiles 'db-agent'
     $executable = Join-Path $installDirectory 'db-agent.exe'
     if (Test-Path -LiteralPath $executable) {
-        throw "An installation already exists at $executable. Resume its setup or use its signed update command; nothing was overwritten."
+        Assert-DbAgentDirectory $installDirectory
+        Add-DbAgentPath $installDirectory
+        throw "An installation already exists at $executable. Resume its setup with db-agent install, or use its signed update command; nothing was overwritten."
     }
     if (Test-Path -LiteralPath $installDirectory) { Assert-DbAgentDirectory $installDirectory }
     else { New-DbAgentDirectory $installDirectory }
@@ -242,7 +310,9 @@ function Invoke-DbAgentInstall {
         if ([IO.File]::Exists($artifact)) { [IO.File]::Delete($artifact) }
         [IO.Directory]::Delete($work, $false)
     }
-    Write-Information "Verified db-agent $($release.Version) installed at $executable. Starting setup; service startup is not proof of a completed backup." -InformationAction Continue
+    Write-Information "Verified db-agent $($release.Version) installed at $executable." -InformationAction Continue
+    Add-DbAgentPath $installDirectory
+    Write-Information 'Starting setup; service startup is not proof of a completed backup.' -InformationAction Continue
     Invoke-DbAgentSetup $executable -ServiceOnly:$ServiceOnly -Config $Config -AuthToken $AuthToken
 }
 

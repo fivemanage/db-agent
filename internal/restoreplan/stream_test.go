@@ -174,7 +174,7 @@ func FuzzStreamingFraming(f *testing.F) {
 		}
 		want, wantErr := split(context.Background(), input, options)
 		var got []string
-		err := scanStatements(context.Background(), iotest.OneByteReader(strings.NewReader(input)), options, func(raw string, _ int64) error {
+		err := scanStatements(context.Background(), iotest.OneByteReader(strings.NewReader(input)), options, func(raw string, _ int64, _ string) error {
 			parts, err := split(context.Background(), raw, options)
 			if err == nil {
 				got = append(got, parts...)

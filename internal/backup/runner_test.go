@@ -332,8 +332,25 @@ func TestRecoveryPreservesIdentityAndSuccessfulPendingCompletion(t *testing.T) {
 				t.Fatalf("outage not queued: %v", err)
 			}
 			snapshot, err := r.Snapshot()
-			if err != nil || snapshot.Activity != controlplane.Error || snapshot.LastError != controlplane.UploadFailed || !snapshot.Latest.Pending {
+			activity, problem := controlplane.Error, controlplane.UploadFailed
+			if failedStage == "complete" {
+				activity, problem = controlplane.Uploading, controlplane.NoProblem
+			}
+			if err != nil || snapshot.Activity != activity || snapshot.LastError != problem || !snapshot.Latest.Pending {
 				t.Fatalf("wrong queued state: %+v %v", snapshot, err)
+			}
+			if state := r.HeartbeatState(controlplane.State{Status: controlplane.Idle}); state.Status != activity || state.Problem != problem {
+				t.Fatalf("wrong queued heartbeat: %+v", state)
+			}
+			if failedStage == "complete" {
+				for range 2 {
+					if err := r.Resume(context.Background()); !errors.Is(err, ErrQueued) || !strings.Contains(err.Error(), "uploaded; waiting to confirm completion") {
+						t.Fatalf("completion retry not distinguished from upload failure: %v", err)
+					}
+					if state := r.HeartbeatState(controlplane.State{Status: controlplane.Idle}); state.Status != controlplane.Uploading || state.Problem != controlplane.NoProblem {
+						t.Fatalf("completion retry reported an upload error: %+v", state)
+					}
+				}
 			}
 			assertFiles(t, dir, true, failedStage == "initiate")
 			if err := r.Run(context.Background(), prepare); !errors.Is(err, ErrQueued) || dumps.Load() != 1 {
@@ -346,8 +363,11 @@ func TestRecoveryPreservesIdentityAndSuccessfulPendingCompletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			snapshot, err = restarted.Snapshot()
-			if err != nil || snapshot.Activity != controlplane.Idle || snapshot.Latest.Status != "success" || snapshot.Latest.Pending || puts.Load() != 1 || dumps.Load() != 1 {
+			if err != nil || snapshot.Activity != controlplane.Idle || snapshot.LastError != controlplane.NoProblem || snapshot.Latest.Status != "success" || snapshot.Latest.Pending || puts.Load() != 1 || dumps.Load() != 1 {
 				t.Fatalf("bad recovery: %+v %v", snapshot, err)
+			}
+			if state := restarted.HeartbeatState(controlplane.State{Status: controlplane.Idle}); state.Status != controlplane.Idle || state.Problem != controlplane.NoProblem {
+				t.Fatalf("completion acknowledgment did not clear pending heartbeat: %+v", state)
 			}
 			for _, request := range p.initiations {
 				if !reflect.DeepEqual(request, p.initiations[0]) {
@@ -360,6 +380,69 @@ func TestRecoveryPreservesIdentityAndSuccessfulPendingCompletion(t *testing.T) {
 				}
 			}
 			assertFiles(t, dir, false, false)
+		})
+	}
+}
+
+func TestFailedBackupRemainsAnErrorWhileCompletionIsQueued(t *testing.T) {
+	for _, stage := range []string{"dump", "upload"} {
+		t.Run(stage, func(t *testing.T) {
+			storage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer storage.Close()
+			p := &testPlane{url: storage.URL, completeError: &controlplane.ResponseError{StatusCode: 503}}
+			dir := t.TempDir()
+			r := testRunner(t, dir, p, storage, transfer.Options{})
+			err := r.Run(context.Background(), plan(t, artifact.Gzip, func(_ context.Context, dst io.Writer) error {
+				if stage == "dump" {
+					return errors.New("private dump error")
+				}
+				_, err := io.WriteString(dst, "database dump")
+				return err
+			}))
+			if err == nil || errors.Is(err, ErrConfirmationQueued) {
+				t.Fatalf("failed backup reported as successful upload: %v", err)
+			}
+			problem := controlplane.BackupFailed
+			if stage == "upload" {
+				problem = controlplane.UploadFailed
+			}
+			restarted := testRunner(t, dir, p, storage, transfer.Options{})
+			if err := restarted.Resume(context.Background()); err == nil || errors.Is(err, ErrConfirmationQueued) {
+				t.Fatalf("failed completion retry reported as successful upload: %v", err)
+			}
+			state := restarted.HeartbeatState(controlplane.State{Status: controlplane.Idle})
+			if state.Status != controlplane.Error || state.Problem != problem {
+				t.Fatalf("queued failed completion lost its error: %+v", state)
+			}
+			assertFiles(t, dir, true, false)
+		})
+	}
+}
+
+func TestRejectedCompletionStillReportsAnErrorAfterSuccessfulUpload(t *testing.T) {
+	for _, rejection := range []error{controlplane.ErrCredentialRejected, &controlplane.ResponseError{StatusCode: 409}} {
+		t.Run(rejection.Error(), func(t *testing.T) {
+			storage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer storage.Close()
+			p := &testPlane{url: storage.URL, completeError: rejection}
+			r := testRunner(t, t.TempDir(), p, storage, transfer.Options{})
+			err := r.Run(context.Background(), plan(t, artifact.Gzip, func(_ context.Context, dst io.Writer) error {
+				_, err := io.WriteString(dst, "database dump")
+				return err
+			}))
+			if !errors.Is(err, rejection) || errors.Is(err, ErrConfirmationQueued) {
+				t.Fatalf("completion rejection hidden: %v", err)
+			}
+			state := r.HeartbeatState(controlplane.State{Status: controlplane.Idle})
+			if state.Status != controlplane.Error || state.Problem != controlplane.CompletionFailed {
+				t.Fatalf("completion rejection misreported as upload failure: %+v", state)
+			}
 		})
 	}
 }

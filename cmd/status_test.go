@@ -58,6 +58,28 @@ func TestBackupStatusWithNoRecordedRuns(t *testing.T) {
 	}
 }
 
+func TestBackupStatusExplainsPendingSuccessfulCompletion(t *testing.T) {
+	dir := t.TempDir()
+	run := backup.Snapshot{Version: 1, Activity: controlplane.Uploading, Latest: &backup.Run{
+		RequestID: strings.Repeat("a", 64), StartedAt: time.Now(), Status: "success", Pending: true,
+		Checksum: "sha256:" + strings.Repeat("b", 64),
+	}}
+	data, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.Create(filepath.Join(dir, "backup-transfer", "run.json"), data); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := printBackupStatus(filepath.Join(dir, "config.yaml"), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "uploaded; waiting to confirm completion") || strings.Contains(output.String(), "activity: error") {
+		t.Fatalf("pending completion misreported: %s", &output)
+	}
+}
+
 func TestBackupStatusDoesNotEchoInvalidPrivateState(t *testing.T) {
 	dir := t.TempDir()
 	if err := securefile.Create(filepath.Join(dir, "backup-transfer", "schedule.json"), []byte("private-invalid-state")); err != nil {

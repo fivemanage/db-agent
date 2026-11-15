@@ -26,6 +26,9 @@ func printBackupStatus(path string, output io.Writer) error {
 	} else {
 		run := snapshot.Latest
 		fmt.Fprintf(output, "Last backup: %s (started %s, pending: %t).\n", run.Status, run.StartedAt.Local().Format(time.RFC3339), run.Pending)
+		if run.Status == "success" && run.Pending {
+			fmt.Fprintln(output, "Encrypted backup uploaded; waiting to confirm completion.")
+		}
 	}
 	fmt.Fprintf(output, "Recorded backup activity: %s.\n", snapshot.Activity)
 	if schedule == nil || schedule.NextRun == nil {

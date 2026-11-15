@@ -16,7 +16,7 @@ var (
 )
 
 const restoreGrantScope = "`fm\\_restore\\_%`.*"
-const restorePrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW"
+const restorePrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER"
 
 // RestoreAccessSQL is a setup template, not a migration or an import executor.
 // The dedicated account may provision destination-only principals; backup SQL

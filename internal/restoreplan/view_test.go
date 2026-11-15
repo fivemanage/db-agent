@@ -54,6 +54,26 @@ WHERE p.id>=1 AND (i.id IS NULL OR i.id>0);`
 	}
 }
 
+func TestViewsAndTriggersShareOnlyAllowlistedScalarFunctions(t *testing.T) {
+	body := "CONCAT(UPPER(COALESCE(note,'none')),LOWER(IFNULL(note,'empty')),UCASE(note),LCASE(note))"
+	input := header + triggerTables + triggerSession +
+		"CREATE VIEW labels AS SELECT id, " + body + " AS label FROM players;" +
+		"CREATE TRIGGER label BEFORE INSERT ON players FOR EACH ROW SET NEW.note=" + strings.ReplaceAll(body, "note", "NEW.note") + ";"
+	plan, err := Prepare(context.Background(), strings.NewReader(input), testOptions())
+	if err != nil || len(plan.Views()) != 1 || len(plan.Triggers()) != 1 {
+		t.Fatalf("allowlisted nested scalar functions failed: %v", err)
+	}
+	for _, expr := range []string{"CONCAT(note,GET_LOCK('private',0))", "original.CONCAT(note,'x')", "IFNULL(note,arbitrary_udf(id))"} {
+		t.Run(expr, func(t *testing.T) {
+			input := header + simpleTable + viewSession + "CREATE VIEW unsafe AS SELECT " + expr + " AS label FROM players;"
+			plan, err := Prepare(context.Background(), strings.NewReader(input), testOptions())
+			if plan != nil || !errors.Is(err, ErrUnsupported) {
+				t.Fatal("nested or qualified function escaped the expression allowlist")
+			}
+		})
+	}
+}
+
 func TestNativeViewPlaceholdersAreValidatedButNeverEmitted(t *testing.T) {
 	for _, kind := range []string{"table", "view"} {
 		t.Run(kind, func(t *testing.T) {

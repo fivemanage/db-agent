@@ -13,6 +13,7 @@ var savedVariables = map[string]string{
 	"old_sql_mode": "sql_mode", "old_sql_notes": "sql_notes", "old_autocommit": "autocommit",
 	"old_note_verbosity": "note_verbosity",
 	"saved_cs_results":   "character_set_results", "saved_col_connection": "collation_connection",
+	"saved_sql_mode": "sql_mode",
 }
 
 func (b *builder) bookkeeping(node *sqlparser.Set) error {
@@ -20,6 +21,13 @@ func (b *builder) bookkeeping(node *sqlparser.Set) error {
 		return err
 	}
 	for _, assignment := range node.Exprs {
+		if assignment.Var.Scope != sqlparser.VariableScope && assignment.Var.Name.Lowered() == "sql_mode" {
+			b.sqlMode = nil
+			if value, ok := assignment.Expr.(*sqlparser.Literal); ok {
+				mode := value.Val
+				b.sqlMode = &mode
+			}
+		}
 		if name := assignment.Var.Name.Lowered(); name == "autocommit" || name == "old_autocommit" {
 			return b.autocommitBookkeeping(node)
 		}
@@ -110,7 +118,7 @@ func boilerplate(node *sqlparser.Set) error {
 				return ErrUnsupported
 			}
 		case "sql_mode":
-			if value != "NO_AUTO_VALUE_ON_ZERO" {
+			if !supportedSQLMode(value) {
 				return ErrUnsupported
 			}
 		case "unique_checks", "foreign_key_checks", "sql_notes", "note_verbosity", "autocommit":
@@ -122,4 +130,25 @@ func boilerplate(node *sqlparser.Set) error {
 		}
 	}
 	return nil
+}
+
+func supportedSQLMode(mode string) bool {
+	if mode == "" {
+		return true
+	}
+	seen := make(map[string]bool)
+	for _, name := range strings.Split(mode, ",") {
+		if seen[name] {
+			return false
+		}
+		seen[name] = true
+		switch name {
+		case "NO_AUTO_VALUE_ON_ZERO", "STRICT_TRANS_TABLES", "STRICT_ALL_TABLES",
+			"ONLY_FULL_GROUP_BY", "NO_ZERO_IN_DATE", "NO_ZERO_DATE",
+			"ERROR_FOR_DIVISION_BY_ZERO", "NO_ENGINE_SUBSTITUTION", "NO_AUTO_CREATE_USER":
+		default:
+			return false
+		}
+	}
+	return true
 }

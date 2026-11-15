@@ -15,7 +15,7 @@ import (
 	"github.com/fivemanage/db-agent/internal/restoreplan"
 )
 
-const provisioningPrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW"
+const provisioningPrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER"
 const provisioningScope = "`fm\\_restore\\_%`.*"
 
 func TestInstallRestoreAccountProvisioningPreservesBackupAndProduction(t *testing.T) {

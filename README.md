@@ -50,6 +50,13 @@ Open **64-bit PowerShell as Administrator**. With `db-agent.exe` placed in
 & 'C:\Program Files\db-agent\db-agent.exe' status
 ```
 
+The FiveManage Windows installer adds `C:\Program Files\db-agent` to the system
+PATH, so after it finishes you can run `db-agent status` from any folder.
+PowerShell windows that were already open before installing need to be reopened
+first. If you placed the executable yourself, add its folder to PATH in **System
+Properties → Environment Variables → System variables → Path**, or keep using the
+full path as shown above.
+
 ### Linux
 
 With the binary placed at `/opt/db-agent/db-agent` in a root-owned, protected directory:
@@ -57,6 +64,15 @@ With the binary placed at `/opt/db-agent/db-agent` in a root-owned, protected di
 ```sh
 sudo /opt/db-agent/db-agent install
 sudo /opt/db-agent/db-agent status
+```
+
+The FiveManage Linux installer creates `/usr/local/bin/db-agent`, pointing to the
+installed binary, so you can run `sudo db-agent status` from any folder on systems
+with `/usr/local/bin` on PATH. It won't overwrite an existing command. If you placed
+the binary yourself, keep using the full path or create the link manually:
+
+```sh
+sudo ln -s /opt/db-agent/db-agent /usr/local/bin/db-agent
 ```
 
 Release builds can include the FiveManage API URL. Development builds require
@@ -122,8 +138,8 @@ pass. Setup doesn't wait for the upload to finish. Check the result in the
 dashboard or with `status`; a running service alone doesn't mean you have a
 completed backup.
 
-Examples below use `db-agent` on your PATH. On Windows, use `db-agent.exe`; on
-Linux, run these commands as root. Add `--config <path>` if your install
+Examples below use `db-agent` on your PATH. On Windows, run them in PowerShell
+as Administrator; on Linux, run them as root. Add `--config <path>` if your install
 uses a nondefault config.
 
 ```sh
@@ -191,9 +207,25 @@ the dashboard into a new, isolated database using its local key. Your production
 database stays untouched. You decide when to point your application at the
 restored database.
 
-Dashboard restore still needs production-readiness testing. Only supported table
-and view definitions can be imported. Routines, triggers, events, or other
-unsupported SQL cause the whole restore to stop before any database writes.
+Dashboard restore still needs production-readiness testing. It imports supported
+tables, views, and row triggers into the new database. Views and triggers use
+destination-only references and a restricted local definer, never the original
+database account. Triggers are created after loading data so they don't run again
+on the backed-up rows.
+
+Supported triggers can assign `NEW` columns before inserts/updates, insert/update/
+delete rows in other restored tables, and use `BEGIN` blocks and `IF` branches.
+Stored routine calls, dynamic SQL, cross-database references, routines, events,
+and other unsupported SQL stop the whole restore before any database writes.
+View support remains limited to validated projections, joins, predicates, and
+allowlisted scalar functions. Aggregates and subqueries are not supported.
+
+Restore accounts created before trigger support need a local administrator to
+add `TRIGGER` to their existing restore-namespace grant, with grant option.
+Keep this permission separate from the backup account. If binary logging is on,
+trigger restore also requires `log_bin_trust_function_creators` enabled. The
+agent checks this before creating accounts or importing and never changes it.
+
 Dashboard restore permits up to 8 GiB each of
 encrypted input and uncompressed SQL, with additional statement/object limits.
 These limits do not raise the separate 1 GiB backup-upload limit.

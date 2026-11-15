@@ -29,7 +29,9 @@ type viewStub struct {
 	viewDropped  bool
 }
 
-func (b *builder) objectCount() int { return len(b.tables) + len(b.views) + len(b.stubs) }
+func (b *builder) objectCount() int {
+	return len(b.tables) + len(b.views) + len(b.stubs) + len(b.triggers)
+}
 
 func (b *builder) dropTable(node *sqlparser.DropTable) error {
 	if node.Temp || !node.IfExists || len(node.FromTables) != 1 {
@@ -339,6 +341,40 @@ func (v *viewContext) expr(expr sqlparser.Expr, depth int) error {
 			return ErrUnsupported
 		}
 		children = []sqlparser.Expr{expr.Expr}
+	case *sqlparser.CurTimeFuncExpr:
+		if expr.Fsp < 0 || expr.Fsp > 6 {
+			return ErrUnsupported
+		}
+		switch expr.Name.Lowered() {
+		case "current_timestamp", "now", "current_date", "curdate", "current_time", "curtime", "utc_timestamp", "utc_date", "utc_time":
+		default:
+			return ErrUnsupported
+		}
+	case *sqlparser.FuncExpr:
+		if !expr.Qualifier.IsEmpty() {
+			return ErrUnsupported
+		}
+		switch expr.Name.Lowered() {
+		case "abs", "lower", "upper", "lcase", "ucase":
+			if len(expr.Exprs) != 1 {
+				return ErrUnsupported
+			}
+		case "ifnull", "nullif":
+			if len(expr.Exprs) != 2 {
+				return ErrUnsupported
+			}
+		case "if":
+			if len(expr.Exprs) != 3 {
+				return ErrUnsupported
+			}
+		case "coalesce", "concat":
+			if len(expr.Exprs) < 1 || len(expr.Exprs) > 64 {
+				return ErrUnsupported
+			}
+		default:
+			return ErrUnsupported
+		}
+		children = expr.Exprs
 	default:
 		return ErrUnsupported
 	}

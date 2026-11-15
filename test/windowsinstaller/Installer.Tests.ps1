@@ -30,6 +30,7 @@ Describe 'Windows installer trust and publication' {
         Mock New-DbAgentDirectory { param($Path); [void][IO.Directory]::CreateDirectory($Path) }
         Mock Receive-DbAgentFile { param($Uri, $Path); [IO.File]::WriteAllBytes($Path, $script:FixtureBytes) }
         Mock Invoke-DbAgentSetup {}
+        Mock Add-DbAgentPath {}
     }
 
     It 'installs only the approved bytes and launches the existing setup with literal arguments' {
@@ -40,6 +41,15 @@ Describe 'Windows installer trust and publication' {
             $Path -eq $installed -and $ServiceOnly -and $Config -eq 'C:\private data\config.yaml'
         }
         @(Get-ChildItem (Split-Path $installed) -Directory -Filter '.install-*').Count | Should -Be 0
+    }
+
+    It 'adds the installation directory to PATH before setup so its resume hints work' {
+        $script:PathAdded = $false
+        Mock Add-DbAgentPath { $script:PathAdded = $true }
+        Mock Invoke-DbAgentSetup { $script:PathAdded | Should -BeTrue }
+        Invoke-DbAgentInstall -ServiceOnly
+        Should -Invoke Add-DbAgentPath -Times 1 -Exactly -ParameterFilter { $Directory -eq (Join-Path $script:ProgramRoot 'db-agent') }
+        Should -Invoke Invoke-DbAgentSetup -Times 1 -Exactly
     }
 
     It 'passes the literal auth token only to verified setup' {
@@ -54,6 +64,7 @@ Describe 'Windows installer trust and publication' {
         { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*checksum mismatch*'
         Should -Invoke Invoke-DbAgentSetup -Times 0
         Test-Path (Join-Path $script:ProgramRoot 'db-agent/db-agent.exe') | Should -BeFalse
+        Should -Invoke Add-DbAgentPath -Times 0
     }
 
     It 'never overwrites an existing installation or runs it from the bootstrap' {
@@ -64,6 +75,17 @@ Describe 'Windows installer trust and publication' {
         { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*already exists*'
         [IO.File]::ReadAllText($path) | Should -BeExactly 'existing binary'
         Should -Invoke Receive-DbAgentFile -Times 0
+        Should -Invoke Invoke-DbAgentSetup -Times 0
+        Should -Invoke Add-DbAgentPath -Times 1 -Exactly -ParameterFilter { $Directory -eq (Join-Path $script:ProgramRoot 'db-agent') }
+    }
+
+    It 'never adds an unsafe existing installation directory to PATH' {
+        $script:ExistingDirectory = Join-Path $script:ProgramRoot 'db-agent'
+        [void][IO.Directory]::CreateDirectory($script:ExistingDirectory)
+        [IO.File]::WriteAllText((Join-Path $script:ExistingDirectory 'db-agent.exe'), 'existing binary')
+        Mock Assert-DbAgentDirectory { throw 'unsafe owner' } -ParameterFilter { $Path -eq $script:ExistingDirectory }
+        { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*unsafe owner*'
+        Should -Invoke Add-DbAgentPath -Times 0
     }
 
     It 'retains the verified binary when setup fails and preserves the error' {
@@ -102,6 +124,52 @@ Describe 'Windows installer trust and publication' {
         { Invoke-DbAgentInstall -ServiceOnly } | Should -Throw '*unsafe owner*'
         Should -Invoke New-DbAgentDirectory -Times 0
         Should -Invoke Receive-DbAgentFile -Times 0
+    }
+}
+
+Describe 'System PATH registration' {
+    BeforeEach {
+        $script:PreviousProcessPath = $env:Path
+        $script:MachinePath = '%SystemRoot%\system32;C:\Tools;'
+        Mock Get-DbAgentMachinePath { return $script:MachinePath }
+        Mock Set-DbAgentMachinePath {}
+    }
+
+    AfterEach {
+        $env:Path = $script:PreviousProcessPath
+    }
+
+    It 'appends the directory without expanding existing entries and updates this session' {
+        $env:Path = 'C:\Windows'
+        Add-DbAgentPath 'C:\Program Files\db-agent'
+        Should -Invoke Set-DbAgentMachinePath -Times 1 -Exactly -ParameterFilter {
+            $Value -ceq '%SystemRoot%\system32;C:\Tools;C:\Program Files\db-agent'
+        }
+        $env:Path | Should -BeExactly 'C:\Windows;C:\Program Files\db-agent'
+    }
+
+    It 'does not duplicate an entry that differs only by case, quotes, or a trailing slash' {
+        $script:MachinePath = 'C:\Tools;"c:\program files\DB-AGENT\"'
+        $env:Path = 'C:\PROGRAM FILES\db-agent\'
+        Add-DbAgentPath 'C:\Program Files\db-agent'
+        Should -Invoke Set-DbAgentMachinePath -Times 0
+        $env:Path | Should -BeExactly 'C:\PROGRAM FILES\db-agent\'
+    }
+
+    It 'registers the directory on an empty PATH' {
+        $script:MachinePath = ''
+        Add-DbAgentPath 'C:\Program Files\db-agent'
+        Should -Invoke Set-DbAgentMachinePath -Times 1 -Exactly -ParameterFilter { $Value -ceq 'C:\Program Files\db-agent' }
+    }
+
+    It 'warns with the full executable path instead of failing the install' {
+        Mock Set-DbAgentMachinePath { throw 'registry fixture failure' }
+        $env:Path = 'C:\Windows'
+        $warnings = @(Add-DbAgentPath 'C:\Program Files\db-agent' 3>&1)
+        $warnings.Count | Should -Be 1
+        "$($warnings[0])" | Should -BeLike "*& 'C:\Program Files\db-agent\db-agent.exe' <command>*"
+        "$($warnings[0])" | Should -Not -BeLike '*registry fixture*'
+        $env:Path | Should -BeExactly 'C:\Windows'
     }
 }
 

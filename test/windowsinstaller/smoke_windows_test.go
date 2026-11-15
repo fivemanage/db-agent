@@ -24,6 +24,7 @@ import (
 	"github.com/fivemanage/db-agent/internal/securefile"
 	services "github.com/fivemanage/db-agent/internal/service"
 	manager "github.com/kardianos/service"
+	"golang.org/x/sys/windows/registry"
 )
 
 func TestWindowsBootstrapServiceOnly(t *testing.T) {
@@ -45,6 +46,28 @@ func TestWindowsBootstrapServiceOnly(t *testing.T) {
 	if _, err := os.Lstat(installDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("refusing to touch an existing or indeterminate installation directory")
 	}
+	pathBefore := machinePath(t)
+	for _, entry := range strings.Split(pathBefore, ";") {
+		if strings.EqualFold(strings.TrimRight(strings.Trim(entry, `"`), `\`), installDir) {
+			t.Fatal("refusing to run with an existing db-agent system PATH entry")
+		}
+	}
+	pathAfter := strings.TrimRight(pathBefore, ";") + ";" + installDir
+	t.Cleanup(func() {
+		if current := machinePath(t); current != pathAfter {
+			t.Errorf("system PATH changed unexpectedly; restore it manually from: %s", pathBefore)
+			return
+		}
+		key, err := registry.OpenKey(registry.LOCAL_MACHINE, environmentKey, registry.SET_VALUE)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer key.Close()
+		if err := key.SetExpandStringValue("Path", pathBefore); err != nil {
+			t.Error(err)
+		}
+	})
 	data, err := os.ReadFile(os.Getenv("DB_AGENT_WINDOWS_SMOKE_ARTIFACT"))
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +177,9 @@ func TestWindowsBootstrapServiceOnly(t *testing.T) {
 	t.Setenv("DB_AGENT_FIXTURE_CONFIG", configPath)
 	started := time.Now()
 	runPS(t, `& ([scriptblock]::Create([IO.File]::ReadAllText($env:DB_AGENT_FIXTURE_INSTALLER))) -ServiceOnly -Config $env:DB_AGENT_FIXTURE_CONFIG`)
+	if current := machinePath(t); current != pathAfter {
+		t.Fatalf("installer did not append its directory to the unexpanded system PATH: %q", current)
+	}
 	select {
 	case version := <-heartbeats:
 		if version != "1.2.3" {
@@ -163,6 +189,25 @@ func TestWindowsBootstrapServiceOnly(t *testing.T) {
 		t.Fatal("installed service did not authenticate its heartbeat")
 	}
 	t.Logf("native Windows bootstrap + service-only liveness: %s; not a full wizard/backup or two-minute customer qualification", time.Since(started))
+}
+
+const environmentKey = `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+
+func machinePath(t *testing.T) string {
+	t.Helper()
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, environmentKey, registry.QUERY_VALUE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Close()
+	value, kind, err := key.GetStringValue("Path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != registry.EXPAND_SZ {
+		t.Fatalf("system PATH registry type is %d, want REG_EXPAND_SZ", kind)
+	}
+	return value
 }
 
 func runPS(t *testing.T, script string) {

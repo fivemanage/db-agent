@@ -72,7 +72,9 @@ func runHeartbeatTransfers(
 					return
 				}
 
-				if err != nil && !errors.Is(err, transfer.ErrBusy) && !errors.Is(err, backup.ErrRunning) {
+				if errors.Is(err, backup.ErrConfirmationQueued) {
+					fmt.Fprintln(output, "Encrypted backup uploaded; waiting to confirm completion. The agent will retry automatically.")
+				} else if err != nil && !errors.Is(err, transfer.ErrBusy) && !errors.Is(err, backup.ErrRunning) {
 					fmt.Fprintln(output, "Backup transfer remains queued or failed; check local backup status.")
 				}
 			}

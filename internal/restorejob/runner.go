@@ -225,7 +225,7 @@ func executionProblem(err error, state State) Problem {
 		return WriteAuthorizationUnavailable
 	case errors.Is(err, restoreplan.ErrUnsupported):
 		return UnsafeImport
-	case errors.Is(err, database.ErrRestorePolicy):
+	case errors.Is(err, database.ErrRestorePolicy), errors.Is(err, database.ErrRestoreTriggerPolicy):
 		return UnsafeImport
 	case errors.Is(err, restore.ErrIntegrity), errors.Is(err, restore.ErrFormat), errors.Is(err, ErrTransition):
 		return ArtifactInvalid

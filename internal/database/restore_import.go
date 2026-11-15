@@ -19,11 +19,12 @@ import (
 )
 
 var (
-	ErrRestoreExists     = errors.New("restore destination or import identity already exists; nothing was reused or overwritten; inspect the isolated destination before requesting a new job")
-	ErrRestoreImport     = errors.New("isolated restore import failed; the partial destination is retained for inspection, never automatically retried or dropped")
-	ErrRestoreValidation = errors.New("isolated restore validation failed; the destination was not declared successful")
-	ErrRestoreUncertain  = errors.New("cannot confirm restore SQL has stopped or its import account is locked; inspect the isolated destination and local server before cutover")
-	ErrRestorePolicy     = errors.New("local SQL server cannot enforce the required restore safety policy; no import was started")
+	ErrRestoreExists        = errors.New("restore destination or import identity already exists; nothing was reused or overwritten; inspect the isolated destination before requesting a new job")
+	ErrRestoreImport        = errors.New("isolated restore import failed; the partial destination is retained for inspection, never automatically retried or dropped")
+	ErrRestoreValidation    = errors.New("isolated restore validation failed; the destination was not declared successful")
+	ErrRestoreUncertain     = errors.New("cannot confirm restore SQL has stopped or its import account is locked; inspect the isolated destination and local server before cutover")
+	ErrRestorePolicy        = errors.New("local SQL server cannot enforce the required restore safety policy; no import was started")
+	ErrRestoreTriggerPolicy = errors.New("trigger restore requires log_bin_trust_function_creators enabled when binary logging is on; ask a local database administrator to review this server setting; no import was started")
 )
 
 const DefaultRestoreStatementTimeout = 5 * time.Minute
@@ -93,6 +94,14 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 	if !supportsRestoreLock(settings.Driver, version) || plan.HasJSONChecks() && settings.Driver == "mysql" && !supportsMySQLChecks(version) {
 		return ErrRestorePolicy
 	}
+	if len(plan.Triggers()) != 0 {
+		probe, stop = context.WithTimeout(ctx, Timeout)
+		err = checkRestoreTriggerPolicy(probe, conn)
+		stop()
+		if err != nil {
+			return err
+		}
+	}
 	digest := sha256.Sum256([]byte(plan.Destination()))
 	user := "fmr_" + hex.EncodeToString(digest[:14])
 	account := "'" + user + "'@'" + identity[at+1:] + "'"
@@ -151,6 +160,14 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 		return ErrRestorePrivileges
 	}
 	return importAsChild(ctx, child, plan, statementTimeout, beforeValidation)
+}
+
+func checkRestoreTriggerPolicy(ctx context.Context, conn *sql.Conn) error {
+	var binaryLog, trusted bool
+	if err := conn.QueryRowContext(ctx, "SELECT @@global.log_bin, @@global.log_bin_trust_function_creators").Scan(&binaryLog, &trusted); err != nil || binaryLog && !trusted {
+		return ErrRestoreTriggerPolicy
+	}
+	return nil
 }
 
 func supportsRestoreLock(driver, version string) bool {
@@ -240,7 +257,7 @@ func importAsChild(ctx context.Context, settings config.DatabaseConfig, plan *re
 			// MySQL 8 recommends adding zero-date modes to strict mode (3135).
 			// Keep legacy literal zero-date fidelity: ignore only this advisory
 			// on our exact setup statement, never warnings from recovered DML.
-			if ordinal == 1 && statement == restoreplan.SessionModeSQL && code == 3135 {
+			if statement == restoreplan.SessionModeSQL && code == 3135 {
 				return nil
 			}
 			return &RestoreWarningError{Statement: ordinal, Code: code}

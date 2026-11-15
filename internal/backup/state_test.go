@@ -31,6 +31,22 @@ func TestAbandonedRunIsNotReportedAsActive(t *testing.T) {
 	}
 }
 
+func TestPendingSuccessfulCompletionIsNotAnAbandonedUpload(t *testing.T) {
+	dir := t.TempDir()
+	r := testRunner(t, dir, &testPlane{}, nil, transfer.Options{})
+	snapshot := Snapshot{Version: 1, Activity: controlplane.Uploading, Latest: &Run{
+		RequestID: strings.Repeat("a", 64), BackupID: "backup_1", StartedAt: time.Now(),
+		Status: "success", Pending: true, Checksum: "sha256:" + strings.Repeat("b", 64),
+	}}
+	if err := r.save(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restarted := testRunner(t, dir, &testPlane{}, nil, transfer.Options{})
+	if state := restarted.HeartbeatState(controlplane.State{Status: controlplane.Idle}); state.Status != controlplane.Uploading || state.Problem != controlplane.NoProblem {
+		t.Fatalf("pending completion reported as abandoned upload: %+v", state)
+	}
+}
+
 func TestCorruptStateBlocksNewRunsWithoutStartingDump(t *testing.T) {
 	dir := t.TempDir()
 	r := testRunner(t, dir, &testPlane{}, nil, transfer.Options{})

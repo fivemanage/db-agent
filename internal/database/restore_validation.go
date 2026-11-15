@@ -142,5 +142,53 @@ func validateRestore(ctx context.Context, conn *sql.Conn, identity string, plan 
 			return ErrRestoreValidation
 		}
 	}
+	statement, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
+	if err := validateRestoreTriggers(statement, conn, identity, plan); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateRestoreTriggers(ctx context.Context, conn *sql.Conn, identity string, plan *restoreplan.Plan) error {
+	expected := make(map[string]restoreplan.Trigger)
+	for _, trigger := range plan.Triggers() {
+		expected[trigger.Name] = trigger
+	}
+	rows, err := conn.QueryContext(ctx, "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER, DEFINER, COLLATION_CONNECTION, SQL_MODE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?", plan.Destination())
+	if err != nil {
+		return ErrRestoreValidation
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, table, timing, event, definer, collation, mode string
+		var order int
+		if rows.Scan(&name, &table, &timing, &event, &order, &definer, &collation, &mode) != nil {
+			return ErrRestoreValidation
+		}
+		trigger, ok := expected[name]
+		if !ok || table != trigger.Table || timing != trigger.Timing || event != trigger.Event || order != trigger.Order ||
+			definer != identity || collation != trigger.Collation || !sameSQLModes(mode, trigger.SQLMode) {
+			return ErrRestoreValidation
+		}
+		delete(expected, name)
+	}
+	if rows.Err() != nil || len(expected) != 0 {
+		return ErrRestoreValidation
+	}
+	return nil
+}
+
+func sameSQLModes(left, right string) bool {
+	modes := make(map[string]bool)
+	for _, mode := range strings.Split(left, ",") {
+		modes[mode] = true
+	}
+	for _, mode := range strings.Split(right, ",") {
+		if !modes[mode] {
+			return false
+		}
+		delete(modes, mode)
+	}
+	return len(modes) == 0
 }

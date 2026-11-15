@@ -14,11 +14,12 @@ import (
 )
 
 var (
-	ErrRunning = errors.New("a backup or restore is already running; wait for it to finish before retrying db-agent backup --now")
-	ErrQueued  = errors.New("a backup upload or completion is still queued; restore control-plane connectivity and let the agent retry before starting another backup")
-	ErrState   = errors.New("cannot access private backup run state; check permissions and run db-agent test")
-	ErrFailed  = errors.New("backup failed; run db-agent test and check local backup status before retrying")
-	ErrSpace   = errors.New("backup stopped at the local spool or free-space limit; free disk space or reduce the backup scope before retrying")
+	ErrRunning            = errors.New("a backup or restore is already running; wait for it to finish before retrying db-agent backup --now")
+	ErrQueued             = errors.New("a backup upload or completion is still queued; restore control-plane connectivity and let the agent retry before starting another backup")
+	ErrConfirmationQueued = errors.New("encrypted backup uploaded; waiting to confirm completion; let the agent retry before starting another backup")
+	ErrState              = errors.New("cannot access private backup run state; check permissions and run db-agent test")
+	ErrFailed             = errors.New("backup failed; run db-agent test and check local backup status before retrying")
+	ErrSpace              = errors.New("backup stopped at the local spool or free-space limit; free disk space or reduce the backup scope before retrying")
 )
 
 type Plan struct {
@@ -126,6 +127,7 @@ func (r *Runner) lock() (func(), error) {
 func (r *Runner) failure(err error) error {
 	message := ErrFailed
 	problem := controlplane.BackupFailed
+	localFailure := errors.Is(err, transfer.ErrLocal) || errors.Is(err, ErrState)
 	if errors.Is(err, transfer.ErrPending) || errors.Is(err, transfer.ErrUpload) {
 		problem = controlplane.UploadFailed
 	}
@@ -141,11 +143,17 @@ func (r *Runner) failure(err error) error {
 	if snapshot, loadErr := r.load(); loadErr == nil && snapshot.Latest != nil {
 		if snapshot.Latest.Status == "failed" && snapshot.LastError != controlplane.NoProblem {
 			problem = snapshot.LastError
-		} else if snapshot.Latest.Status == "success" && snapshot.Latest.Pending {
-			problem = controlplane.UploadFailed
+		} else if snapshot.confirmationPending() {
+			var response *controlplane.ResponseError
+			rejected := errors.Is(err, controlplane.ErrCredentialRejected) ||
+				errors.As(err, &response) && response.StatusCode != 429 && response.StatusCode < 500
+			if errors.Is(err, transfer.ErrPending) && !localFailure && !rejected {
+				return &safeError{ErrConfirmationQueued, errors.Join(ErrQueued, err)}
+			}
+			problem = controlplane.CompletionFailed
 		}
 	}
-	if errors.Is(err, transfer.ErrLocal) || errors.Is(err, ErrState) {
+	if localFailure {
 		return errors.Join(&safeError{ErrState, err}, r.markError(problem))
 	}
 	return errors.Join(&safeError{message, err}, r.markError(problem))

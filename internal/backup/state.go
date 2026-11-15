@@ -36,6 +36,10 @@ type Run struct {
 	Pending         bool      `json:"pending"`
 }
 
+func (s Snapshot) confirmationPending() bool {
+	return s.Latest != nil && s.Latest.Status == "success" && s.Latest.Pending
+}
+
 func ReadSnapshot(dir string) (Snapshot, error) {
 	if dir == "" {
 		return Snapshot{}, ErrState
@@ -50,7 +54,9 @@ func (r *Runner) Snapshot() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if snapshot.Activity == controlplane.BackingUp || snapshot.Activity == controlplane.Uploading {
+	// An unfinished dump or PUT needs a live lock owner. A durable completion
+	// report can wait for replay without holding the run lock.
+	if snapshot.Activity == controlplane.BackingUp || snapshot.Activity == controlplane.Uploading && !snapshot.confirmationPending() {
 		unlock, err := r.lock()
 		if err == nil {
 			defer unlock()
@@ -59,7 +65,7 @@ func (r *Runner) Snapshot() (Snapshot, error) {
 			if err != nil {
 				return Snapshot{}, err
 			}
-			if snapshot.Activity == controlplane.BackingUp || snapshot.Activity == controlplane.Uploading {
+			if snapshot.Activity == controlplane.BackingUp || snapshot.Activity == controlplane.Uploading && !snapshot.confirmationPending() {
 				snapshot.LastError = controlplane.BackupFailed
 				if snapshot.Activity == controlplane.Uploading {
 					snapshot.LastError = controlplane.UploadFailed
@@ -130,7 +136,7 @@ func (s Snapshot) valid() bool {
 		return false
 	}
 	switch s.LastError {
-	case controlplane.NoProblem, controlplane.SetupIncomplete, controlplane.DatabaseUnavailable, controlplane.BackupFailed, controlplane.UploadFailed:
+	case controlplane.NoProblem, controlplane.SetupIncomplete, controlplane.DatabaseUnavailable, controlplane.BackupFailed, controlplane.UploadFailed, controlplane.CompletionFailed:
 	default:
 		return false
 	}

@@ -9,6 +9,17 @@ import (
 // Executable comments are expanded regardless of server version. Conditional
 // syntax must pass the same allowlist, never become a hidden future operation.
 func split(ctx context.Context, input string, options Options) ([]string, error) {
+	return splitFrame(ctx, input, options, ";")
+}
+
+func splitFrame(ctx context.Context, input string, options Options, delimiter string) ([]string, error) {
+	compound := delimiter != ";"
+	if compound {
+		if !strings.HasSuffix(input, delimiter) {
+			return nil, ErrUnsupported
+		}
+		input = strings.TrimSuffix(input, delimiter)
+	}
 	if !utf8.ValidString(input) || strings.IndexByte(input, 0) >= 0 {
 		return nil, ErrUnsupported
 	}
@@ -78,7 +89,7 @@ func split(ctx context.Context, input string, options Options) ([]string, error)
 					if current.Len()+len(body) > options.MaxStatementBytes {
 						return nil, ErrLimit
 					}
-					if err := executable(ctx, body, &depth); err != nil {
+					if err := executable(ctx, body, &depth, compound); err != nil {
 						return nil, err
 					}
 					current.WriteByte(' ')
@@ -105,6 +116,11 @@ func split(ctx context.Context, input string, options Options) ([]string, error)
 				return nil, ErrUnsupported
 			}
 		case ';':
+			if compound {
+				current.WriteByte(c)
+				i++
+				continue
+			}
 			if depth != 0 {
 				return nil, ErrUnsupported
 			}
@@ -122,16 +138,25 @@ func split(ctx context.Context, input string, options Options) ([]string, error)
 		current.WriteByte(c)
 		i++
 	}
-	if depth != 0 || strings.TrimSpace(current.String()) != "" {
+	if current.Len() > options.MaxStatementBytes {
+		return nil, ErrLimit
+	}
+	if depth != 0 {
 		return nil, ErrUnsupported
+	}
+	if tail := strings.TrimSpace(current.String()); tail != "" {
+		if !compound {
+			return nil, ErrUnsupported
+		}
+		statements = append(statements, tail)
 	}
 	return statements, nil
 }
 
-// View bodies can contain expressions and quoted literals inside executable
-// comments. Validate their boundaries exactly as SQL, never as a raw substring
-// to bypass framing limits or introduce a second statement/client command.
-func executable(ctx context.Context, body string, depth *int) error {
+// View and trigger bodies can contain expressions and quoted literals inside
+// executable comments. Only custom-delimited frames allow body semicolons;
+// their complete structure still has to pass the trigger grammar.
+func executable(ctx context.Context, body string, depth *int, compound bool) error {
 	for i := 0; i < len(body); i++ {
 		if i%4096 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -145,7 +170,11 @@ func executable(ctx context.Context, body string, depth *int) error {
 				return err
 			}
 			i = end - 1
-		case ';', '#', '\\':
+		case ';':
+			if !compound {
+				return ErrUnsupported
+			}
+		case '#', '\\':
 			return ErrUnsupported
 		case '-':
 			if i+1 < len(body) && body[i+1] == '-' {

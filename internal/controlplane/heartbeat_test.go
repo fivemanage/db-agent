@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestHeartbeatWorkerSendsImmediatelyAndReadsCurrentActivityOnTicks(t *testin
 	done := make(chan error, 1)
 	state := State{Status: Idle}
 	go func() {
-		done <- c.runHeartbeat(ctx, func() State { return state }, func(result Result) { results <- result }, ticks)
+		done <- c.runHeartbeat(ctx, func() State { return state }, func(result Result) { results <- result }, ticks, nil)
 	}()
 	for _, next := range []Status{Idle, BackingUp, Uploading} {
 		if next != Idle {
@@ -87,7 +88,7 @@ func TestHeartbeatWorkerRecoversAndStopsOnCredentialRejection(t *testing.T) {
 	results := make(chan Result, 3)
 	done := make(chan error, 1)
 	go func() {
-		done <- c.runHeartbeat(ctx, func() State { return State{Status: Idle} }, func(result Result) { results <- result }, ticks)
+		done <- c.runHeartbeat(ctx, func() State { return State{Status: Idle} }, func(result Result) { results <- result }, ticks, nil)
 	}()
 	for i, expected := range []Connection{Unreachable, Connected, Rejected} {
 		if i > 0 {
@@ -119,6 +120,86 @@ func TestHeartbeatWorkerRecoversAndStopsOnCredentialRejection(t *testing.T) {
 	}
 }
 
+func TestHeartbeatStateChangesDoNotWaitForIntervalOrOverlapOldRequests(t *testing.T) {
+	observed := make(chan heartbeatRequest, 4)
+	allowFirst := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		var request heartbeatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		observed <- request
+		if call == 1 {
+			select {
+			case <-allowFirst:
+			case <-ctx.Done():
+			}
+		}
+		io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	defer cancel()
+	c := testClient(t, server.URL)
+	var mu sync.Mutex
+	state := State{Status: Error, Problem: UploadFailed}
+	current := func() State {
+		mu.Lock()
+		defer mu.Unlock()
+		return state
+	}
+	changes := make(chan time.Time, 1)
+	results := make(chan Result, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.runHeartbeat(ctx, current, func(result Result) { results <- result }, nil, changes)
+	}()
+	for i, next := range []Status{Error, Uploading, Idle} {
+		if i > 0 {
+			mu.Lock()
+			state = State{Status: next}
+			mu.Unlock()
+			changes <- time.Now()
+			if i == 1 {
+				close(allowFirst)
+			}
+		}
+		select {
+		case payload := <-observed:
+			if payload.Status != next || next != Error && payload.LastError != "" {
+				t.Fatalf("wrong transition heartbeat: %+v", payload)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("state transition waited for the periodic heartbeat")
+		}
+		if i > 0 {
+			select {
+			case result := <-results:
+				if result.Err != nil {
+					t.Fatal(result.Err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("previous heartbeat did not finish")
+			}
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat worker did not stop")
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("unexpected heartbeat count: %d", calls.Load())
+	}
+}
+
 func TestHeartbeatProblemsCannotContainRawSecrets(t *testing.T) {
 	for _, state := range []State{
 		{Status: "invalid"},
@@ -130,7 +211,7 @@ func TestHeartbeatProblemsCannotContainRawSecrets(t *testing.T) {
 			t.Fatal("unsafe state accepted or echoed")
 		}
 	}
-	for _, problem := range []Problem{NoProblem, SetupIncomplete, DatabaseUnavailable, BackupFailed, UploadFailed} {
+	for _, problem := range []Problem{NoProblem, SetupIncomplete, DatabaseUnavailable, BackupFailed, UploadFailed, CompletionFailed} {
 		payload, err := (State{Status: Error, Problem: problem}).payload("dev")
 		if err != nil || payload.LastError == "" {
 			t.Fatal("classified error did not generate a diagnostic message")

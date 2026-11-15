@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +84,25 @@ func TestHeartbeatScheduleOverrideIsSavedAndUsedByScheduler(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler did not join")
+	}
+}
+
+func TestAutomaticBackupDistinguishesPendingConfirmationFromFailure(t *testing.T) {
+	for _, err := range []error{nil, backup.ErrConfirmationQueued, backup.ErrFailed} {
+		var output, errorOutput bytes.Buffer
+		reportAutomaticBackup(err, &output, &errorOutput)
+		if errors.Is(err, backup.ErrFailed) {
+			if output.Len() != 0 || !strings.Contains(errorOutput.String(), "failed") {
+				t.Fatalf("backup failure not reported: %s %s", &output, &errorOutput)
+			}
+			continue
+		}
+		want := "completion acknowledged"
+		if err != nil {
+			want = "uploaded; waiting to confirm completion"
+		}
+		if errorOutput.Len() != 0 || !strings.Contains(output.String(), want) {
+			t.Fatalf("wrong backup report: %s %s", &output, &errorOutput)
+		}
 	}
 }

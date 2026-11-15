@@ -32,6 +32,27 @@ protected_directory() {
   [ "$((0$permissions & 022))" -eq 0 ] || die "Installation/config directories must not be group/world writable."
 }
 
+add_to_path() {
+  # A symlink follows atomic binary replacements; a hard link would keep the old version.
+  if ! (
+    for directory in / /usr /usr/local; do protected_directory "$directory"; done
+    if [ ! -e /usr/local/bin ] && [ ! -L /usr/local/bin ]; then
+      mkdir -m 755 /usr/local/bin || exit 1
+      chmod 755 /usr/local/bin || exit 1
+    fi
+    protected_directory /usr/local/bin
+    if [ -L /usr/local/bin/db-agent ] && [ "$(readlink -- /usr/local/bin/db-agent)" = "$executable" ]; then
+      exit 0
+    fi
+    # -T prevents following an existing directory or directory symlink. Never overwrite.
+    ln -sT -- "$executable" /usr/local/bin/db-agent
+  ); then
+    printf 'Warning: Could not make db-agent available on PATH; no existing command was overwritten. Run /opt/db-agent/db-agent <command> instead.\n' >&2
+    return
+  fi
+  printf 'db-agent is available through /usr/local/bin/db-agent. If needed, add /usr/local/bin to your shell PATH.\n'
+}
+
 download() {
   if ! curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --tlsv1.2 --connect-timeout 30 --max-time 300 --max-filesize "$3" \
@@ -104,8 +125,13 @@ main() {
     *'@'*|*'?'*|*'#'*|*[[:space:]]*) die "Release URLs must not contain credentials, query strings, fragments, or whitespace." ;;
   esac
   executable=/opt/db-agent/db-agent
-  [ ! -e "$executable" ] && [ ! -L "$executable" ] \
-    || die "An installation already exists. Resume with /opt/db-agent/db-agent install or use its signed update command; this script will not overwrite it."
+  if [ -e "$executable" ] || [ -L "$executable" ]; then
+    if [ -f "$executable" ] && [ ! -L "$executable" ]; then
+      for directory in / /opt /opt/db-agent; do protected_directory "$directory"; done
+      add_to_path
+    fi
+    die "An installation already exists. Resume with /opt/db-agent/db-agent install or use its signed update command; this script will not overwrite it."
+  fi
   interactive=true
   for argument in "${setup_args[@]}"; do
     if [ "$argument" = --service-only ]; then interactive=false; fi
@@ -167,6 +193,7 @@ main() {
   ln -- "$work/artifact" "$executable" || die "Could not publish without overwriting an existing installation."
   sync -f /opt/db-agent
   cleanup
+  add_to_path
   printf 'Verified db-agent %s installed at %s. Starting setup; service startup is not proof of a completed backup.\n' "$version" "$executable"
   # Only the verified setup receives the token, not download/version subprocesses
   # or the agent's CLI arguments. The agent consumes and clears this environment.

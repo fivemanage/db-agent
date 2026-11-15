@@ -14,6 +14,7 @@ import unittest
 
 INSTALLER = "/usr/local/bin/install-linux.sh"
 EXECUTABLE = pathlib.Path("/opt/db-agent/db-agent")
+COMMAND = pathlib.Path("/usr/local/bin/db-agent")
 EXECUTED = pathlib.Path("/tmp/agent-executed")
 ARGUMENTS = pathlib.Path("/tmp/agent-arguments")
 
@@ -120,6 +121,10 @@ fi
         self.clean_installation()
 
     def clean_installation(self):
+        if COMMAND.is_dir() and not COMMAND.is_symlink():
+            COMMAND.rmdir()
+        else:
+            COMMAND.unlink(missing_ok=True)
         for name in ("/opt/db-agent", "/etc/db-agent"):
             path = pathlib.Path(name)
             if path.is_symlink():
@@ -148,6 +153,7 @@ fi
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(message, result.stderr.decode("utf-8"))
         self.assertFalse(EXECUTABLE.exists())
+        self.assertFalse(COMMAND.is_symlink())
         self.assertEqual(EXECUTED.exists(), executed)
 
     def test_verified_install_uses_existing_wizard_and_preserves_private_files(self):
@@ -157,6 +163,67 @@ fi
         self.assertEqual(EXECUTABLE.stat().st_mode & 0o777, 0o755)
         self.assertEqual(pathlib.Path("/etc/db-agent").stat().st_mode & 0o777, 0o700)
         self.assertEqual(ARGUMENTS.read_text().splitlines(), ["install", "--service-only", "--config", "/etc/db-agent/config.yaml"])
+        self.assertTrue(COMMAND.is_symlink())
+        self.assertEqual(os.readlink(COMMAND), str(EXECUTABLE))
+        version = subprocess.run(["db-agent", "version"], cwd="/", check=True, stdout=subprocess.PIPE)
+        self.assertEqual(version.stdout, b"1.2.3\n")
+
+    def test_command_symlink_follows_binary_replacement(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replacement = EXECUTABLE.with_name("replacement")
+        replacement.write_bytes(self.artifact.replace(b"1.2.3", b"1.2.4"))
+        replacement.chmod(0o755)
+        replacement.replace(EXECUTABLE)
+        version = subprocess.run([str(COMMAND), "version"], check=True, stdout=subprocess.PIPE)
+        self.assertEqual(version.stdout, b"1.2.4\n")
+
+    def test_existing_command_is_not_overwritten_or_followed(self):
+        target = pathlib.Path(self.work.name, "other-command")
+        target.write_bytes(b"preserve existing command")
+        for kind in ("file", "symlink", "dangling-symlink", "directory", "directory-symlink"):
+            with self.subTest(kind=kind):
+                self.clean_installation()
+                os.mkdir("/etc/db-agent", 0o700)
+                for name, contents in self.saved.items():
+                    path = pathlib.Path("/etc/db-agent", name)
+                    path.write_bytes(contents)
+                    path.chmod(0o600)
+                if kind == "file":
+                    COMMAND.write_bytes(b"preserve existing command")
+                elif kind == "symlink":
+                    COMMAND.symlink_to(target)
+                elif kind == "dangling-symlink":
+                    COMMAND.symlink_to(target.with_name("missing"))
+                elif kind == "directory":
+                    COMMAND.mkdir()
+                else:
+                    COMMAND.symlink_to(self.work.name)
+                before = COMMAND.lstat()
+                result = self.run_installer()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(b"Warning: Could not make db-agent available on PATH", result.stderr)
+                self.assertEqual(COMMAND.lstat().st_ino, before.st_ino)
+                self.assertEqual(EXECUTABLE.read_bytes(), self.artifact)
+                self.assertEqual(target.read_bytes(), b"preserve existing command")
+                self.assertFalse(pathlib.Path(self.work.name, "db-agent").exists())
+                if kind == "file":
+                    self.assertEqual(COMMAND.read_bytes(), b"preserve existing command")
+
+    def test_unsafe_path_directory_is_not_changed_or_used(self):
+        for directory in (pathlib.Path("/usr/local"), COMMAND.parent):
+            with self.subTest(directory=str(directory)):
+                mode = directory.stat().st_mode & 0o777
+                directory.chmod(0o777)
+                try:
+                    result = self.run_installer()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(b"Warning: Could not make db-agent available on PATH", result.stderr)
+                    self.assertFalse(COMMAND.is_symlink())
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o777)
+                finally:
+                    directory.chmod(mode)
+                EXECUTABLE.unlink()
 
     def test_install_does_not_require_python_on_the_customer_path(self):
         interpreter = pathlib.Path("/usr/bin/python3")
@@ -259,6 +326,20 @@ fi
         self.assert_rejected(self.run_installer(environment=dict(self.environment, DB_AGENT_RELEASE_PUBLIC_KEY="")), "signing trust is not provisioned")
         self.assertEqual(self.requests, [])
 
+    def test_existing_install_repairs_command_link_without_replacing_binary(self):
+        os.mkdir("/opt/db-agent", 0o755)
+        EXECUTABLE.write_bytes(b"preserve existing binary")
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"installation already exists", result.stderr)
+                self.assertNotIn(b"Warning:", result.stderr)
+                self.assertEqual(os.readlink(COMMAND), str(EXECUTABLE))
+                self.assertEqual(EXECUTABLE.read_bytes(), b"preserve existing binary")
+                self.assertFalse(EXECUTED.exists())
+                self.assertEqual(self.requests, [])
+
     def test_untrusted_https_certificate_is_rejected(self):
         self.assert_rejected(self.run_installer(environment=dict(self.environment, CURL_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt")), "check HTTPS certificates")
 
@@ -286,6 +367,7 @@ fi
         self.assertEqual(result.returncode, 9)
         self.assertIn(b"fixture setup failed", result.stderr)
         self.assertEqual(EXECUTABLE.read_bytes(), self.artifact)
+        self.assertEqual(os.readlink(COMMAND), str(EXECUTABLE))
 
     def test_full_setup_requires_a_real_terminal(self):
         self.assert_rejected(self.run_installer(args=[]), "unredirected terminal")
