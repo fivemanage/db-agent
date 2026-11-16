@@ -27,7 +27,7 @@ func TestLocalRestoreAccountSQLRequiresExactHostAndSeparateAccount(t *testing.T)
 			statements[2] != "GRANT "+restorePrivileges+" ON "+restoreGrantScope+" TO "+account+" WITH GRANT OPTION" {
 			t.Fatal("restore SQL escaped the approved host or namespace")
 		}
-		if !restoreAuthorityGrants(statements[1:]) {
+		if !restoreAuthorityGrants(statements[1:], true) {
 			t.Fatal("generated grants do not satisfy restore readiness")
 		}
 	}

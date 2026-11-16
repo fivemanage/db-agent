@@ -28,14 +28,14 @@ func restoreWarning(ctx context.Context, conn *sql.Conn) (uint16, error) {
 	return code, nil
 }
 
-func checkRestoreChildGrants(ctx context.Context, conn *sql.Conn, destination string) error {
+func checkRestoreChildGrants(ctx context.Context, conn *sql.Conn, destination, privileges string) error {
 	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR CURRENT_USER")
 	if err != nil {
 		return ErrRestorePrivileges
 	}
 	defer rows.Close()
 	required := make(map[string]bool)
-	for _, privilege := range strings.Split(restorePrivileges, ", ") {
+	for _, privilege := range strings.Split(privileges, ", ") {
 		required[privilege] = false
 	}
 	for rows.Next() {

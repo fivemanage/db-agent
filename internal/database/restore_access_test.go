@@ -21,10 +21,10 @@ func authorityGrants() []string {
 }
 
 func TestRestoreAuthorityRequiresOnlyExplicitScopedDirectGrants(t *testing.T) {
-	if !restoreAuthorityGrants(authorityGrants()) {
+	if !restoreAuthorityGrants(authorityGrants(), true) {
 		t.Fatal("expected narrowly scoped provisioning grants were rejected")
 	}
-	for _, scenario := range []string{"missing_create_user", "missing_grant_option", "global_all", "source_read", "wildcard_scope", "global_grant_option", "role", "extra_namespace_privilege", "missing_view_privilege", "missing_trigger_privilege"} {
+	for _, scenario := range []string{"missing_create_user", "missing_grant_option", "global_all", "source_read", "wildcard_scope", "global_grant_option", "role", "extra_namespace_privilege", "missing_view_privilege"} {
 		t.Run(scenario, func(t *testing.T) {
 			grants := authorityGrants()
 			switch scenario {
@@ -46,13 +46,16 @@ func TestRestoreAuthorityRequiresOnlyExplicitScopedDirectGrants(t *testing.T) {
 				grants[2] = strings.Replace(grants[2], "GRANT ", "GRANT DROP, ", 1)
 			case "missing_view_privilege":
 				grants[2] = strings.Replace(grants[2], ", CREATE VIEW", "", 1)
-			case "missing_trigger_privilege":
-				grants[2] = strings.Replace(grants[2], ", TRIGGER", "", 1)
 			}
-			if restoreAuthorityGrants(grants) {
+			if restoreAuthorityGrants(grants, false) || restoreAuthorityGrants(grants, true) {
 				t.Fatal("unsafe or insufficient restore authority was accepted")
 			}
 		})
+	}
+	grants := authorityGrants()
+	grants[2] = strings.Replace(grants[2], ", TRIGGER", "", 1)
+	if !restoreAuthorityGrants(grants, false) || restoreAuthorityGrants(grants, true) {
+		t.Fatal("legacy grants must permit table/view restores, but not trigger restores")
 	}
 }
 
@@ -94,6 +97,9 @@ func expectRestoreProbe(mock sqlmock.Sqlmock, failure string, private error) {
 		return
 	}
 	identity, version := "restore_setup@localhost", "8.4.11"
+	if failure == "missing_trigger_ip" {
+		identity = "restore_setup@127.0.0.1"
+	}
 	if failure == "identity" {
 		identity = "restore_setup@%"
 	}
@@ -122,6 +128,9 @@ func expectRestoreProbe(mock sqlmock.Sqlmock, failure string, private error) {
 		return
 	}
 	grants := authorityGrants()
+	if failure == "missing_trigger" || failure == "missing_trigger_ip" {
+		grants[2] = strings.Replace(grants[2], ", TRIGGER", "", 1)
+	}
 	if failure == "grants" {
 		grants = grants[:1]
 	}
@@ -130,6 +139,40 @@ func expectRestoreProbe(mock sqlmock.Sqlmock, failure string, private error) {
 		rows.AddRow(grant)
 	}
 	query.WillReturnRows(rows)
+}
+
+func TestLegacyRestoreAccessReportsOnlyTheMissingScopedTriggerGrant(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1"} {
+		t.Run(host, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			scenario := "missing_trigger"
+			if host == "127.0.0.1" {
+				scenario = "missing_trigger_ip"
+			}
+			expectRestoreProbe(mock, scenario, nil)
+			err = checkRestoreAccess(context.Background(), db, config.DatabaseConfig{Driver: "mysql", Host: "127.0.0.1", User: "restore_setup", Password: "private-password"})
+			var missing *RestoreTriggerGrantError
+			if !errors.As(err, &missing) || !errors.Is(err, ErrRestorePrivileges) {
+				t.Fatalf("legacy account did not report an actionable trigger-only upgrade: %v", err)
+			}
+			want := "GRANT TRIGGER ON `fm\\_restore\\_%`.* TO 'restore_setup'@'" + host + "' WITH GRANT OPTION;"
+			if missing.SQL != want || !strings.Contains(err.Error(), want) {
+				t.Fatal("trigger grant used a guessed host, the wrong scope, or missing delegation")
+			}
+			for _, secret := range []string{"private-password", "PRIVATEHASH"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("trigger grant notice included secret material")
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestCanceledRestoreProbeDoesNotConnect(t *testing.T) {

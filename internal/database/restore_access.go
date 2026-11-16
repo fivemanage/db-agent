@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/fivemanage/db-agent/internal/config"
@@ -16,7 +17,18 @@ var (
 )
 
 const restoreGrantScope = "`fm\\_restore\\_%`.*"
-const restorePrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER"
+const restoreBasePrivileges = "CREATE, INSERT, SELECT, UPDATE, DELETE, REFERENCES, CREATE VIEW, SHOW VIEW"
+const restorePrivileges = restoreBasePrivileges + ", TRIGGER"
+
+type RestoreTriggerGrantError struct {
+	SQL string
+}
+
+func (e *RestoreTriggerGrantError) Error() string {
+	return "trigger restore needs an additional permission; run this SQL as a local database administrator:\n" + e.SQL
+}
+
+func (e *RestoreTriggerGrantError) Unwrap() error { return ErrRestorePrivileges }
 
 // RestoreAccessSQL is a setup template, not a migration or an import executor.
 // The dedicated account may provision destination-only principals; backup SQL
@@ -37,6 +49,17 @@ func restoreAccountSQL(clientHost, password string) []string {
 // CheckRestoreAccess is read-only: no users, grants, databases, or keys change.
 // Re-run before provisioning; a saved authorization is not proof of live grants.
 func CheckRestoreAccess(ctx context.Context, backup config.DatabaseConfig, access config.RestoreConfig) error {
+	err := CheckRestoreTriggerAccess(ctx, backup, access)
+	var missing *RestoreTriggerGrantError
+	if errors.As(err, &missing) {
+		return nil
+	}
+	return err
+}
+
+// CheckRestoreTriggerAccess also reports the optional TRIGGER grant missing
+// from otherwise safe legacy accounts. Its SQL is guidance, never executed.
+func CheckRestoreTriggerAccess(ctx context.Context, backup config.DatabaseConfig, access config.RestoreConfig) error {
 	if err := access.ValidateFor(backup); err != nil {
 		return err
 	}
@@ -92,18 +115,22 @@ func checkRestoreAccess(ctx context.Context, db *sql.DB, settings config.Databas
 		}
 	}
 	grants, err := readGrants(ctx, db)
-	if err != nil || !restoreAuthorityGrants(grants) {
+	if err != nil || !restoreAuthorityGrants(grants, false) {
 		return ErrRestorePrivileges
+	}
+	if !restoreAuthorityGrants(grants, true) {
+		return &RestoreTriggerGrantError{SQL: fmt.Sprintf("GRANT TRIGGER ON %s TO '%s'@'%s' WITH GRANT OPTION;", restoreGrantScope, settings.User, identity[at+1:])}
 	}
 	return nil
 }
 
-func restoreAuthorityGrants(grants []string) bool {
+func restoreAuthorityGrants(grants []string, requireTriggers bool) bool {
 	createUser := false
 	required := make(map[string]bool)
 	for _, privilege := range strings.Split(restorePrivileges, ", ") {
 		required[privilege] = false
 	}
+	required["TRIGGER"] = !requireTriggers
 	for _, grant := range grants {
 		start, end := strings.Index(grant, " ON "), strings.LastIndex(grant, " TO ")
 		if !strings.HasPrefix(grant, "GRANT ") || start < 6 || end <= start {

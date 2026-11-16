@@ -58,6 +58,7 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 
 	checks := diagnostic.RunReport(ctx, settings)
 	printChecks(output, checks.Checks)
+	printRestoreUpgradeNotice(ctx, output, settings, database.CheckRestoreTriggerAccess)
 	if ctx.Err() != nil {
 		return nil
 	}

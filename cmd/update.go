@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fivemanage/db-agent/internal/config"
+	"github.com/fivemanage/db-agent/internal/database"
 	"github.com/fivemanage/db-agent/internal/operation"
 	"github.com/fivemanage/db-agent/internal/update"
 	"github.com/spf13/cobra"
@@ -93,6 +94,7 @@ var updateCheckCmd = &cobra.Command{
 			return err
 		}
 
+		printRestoreUpgradeNotice(cmd.Context(), cmd.OutOrStdout(), settings, database.CheckRestoreTriggerAccess)
 		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, false, false)
 		if err != nil {
 			return err
@@ -117,6 +119,7 @@ var updateNowCmd = &cobra.Command{
 			return err
 		}
 
+		printRestoreUpgradeNotice(cmd.Context(), cmd.OutOrStdout(), settings, database.CheckRestoreTriggerAccess)
 		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, true, false)
 		if err != nil {
 			return err

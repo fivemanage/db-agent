@@ -68,6 +68,10 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 	probe, stop := context.WithTimeout(ctx, Timeout)
 	err = checkRestoreAccess(probe, authority, settings)
 	stop()
+	var missing *RestoreTriggerGrantError
+	if len(plan.Triggers()) == 0 && errors.As(err, &missing) {
+		err = nil
+	}
 	if err != nil {
 		return err
 	}
@@ -154,12 +158,19 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 		}
 	}()
 	probe, stop = context.WithTimeout(ctx, Timeout)
-	_, err = conn.ExecContext(probe, "GRANT "+restorePrivileges+" ON "+quoteGrantIdentifier(plan.Destination())+".* TO "+account)
+	_, err = conn.ExecContext(probe, "GRANT "+restoreImportPrivileges(plan)+" ON "+quoteGrantIdentifier(plan.Destination())+".* TO "+account)
 	stop()
 	if err != nil {
 		return ErrRestorePrivileges
 	}
 	return importAsChild(ctx, child, plan, statementTimeout, beforeValidation)
+}
+
+func restoreImportPrivileges(plan *restoreplan.Plan) string {
+	if len(plan.Triggers()) != 0 {
+		return restorePrivileges
+	}
+	return restoreBasePrivileges
 }
 
 func checkRestoreTriggerPolicy(ctx context.Context, conn *sql.Conn) error {
@@ -233,7 +244,7 @@ func importAsChild(ctx context.Context, settings config.DatabaseConfig, plan *re
 			return ErrRestorePrivileges
 		}
 	}
-	if err := checkRestoreChildGrants(ctx, conn, plan.Destination()); err != nil {
+	if err := checkRestoreChildGrants(ctx, conn, plan.Destination(), restoreImportPrivileges(plan)); err != nil {
 		return err
 	}
 	// Row-count validation on a session with uncommitted inserts would be a

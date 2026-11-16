@@ -38,13 +38,43 @@ func TestRestoreImportPrincipalRejectsBroaderOrDelegableGrants(t *testing.T) {
 			}
 			rows := sqlmock.NewRows([]string{"grant"}).AddRow("GRANT USAGE ON *.* TO 'child'@'localhost' IDENTIFIED BY PASSWORD '*PRIVATEHASH'").AddRow(grant)
 			mock.ExpectQuery(regexp.QuoteMeta("SHOW GRANTS FOR CURRENT_USER")).WillReturnRows(rows)
-			if err := checkRestoreChildGrants(context.Background(), conn, destination); (err == nil) != (mode == "") {
+			if err := checkRestoreChildGrants(context.Background(), conn, destination, restorePrivileges); (err == nil) != (mode == "") {
 				t.Fatal("child connection was accepted without exact nondelegable destination grants")
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestRestoreImportPrincipalRequiresTriggerOnlyForTriggerPlans(t *testing.T) {
+	destination := "fm_restore_" + strings.Repeat("a", 32)
+	for _, requireTrigger := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		grant := "GRANT " + restoreBasePrivileges + " ON " + quoteGrantIdentifier(destination) + ".* TO 'child'@'localhost'"
+		mock.ExpectQuery("SHOW GRANTS FOR CURRENT_USER").WillReturnRows(sqlmock.NewRows([]string{"grant"}).AddRow(grant))
+		privileges := restoreBasePrivileges
+		if requireTrigger {
+			privileges = restorePrivileges
+		}
+		err = checkRestoreChildGrants(context.Background(), conn, destination, privileges)
+		if (err == nil) == requireTrigger {
+			t.Fatal("trigger-free imports required TRIGGER, or trigger imports bypassed it")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+		db.Close()
 	}
 }
 

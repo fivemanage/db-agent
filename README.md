@@ -221,7 +221,15 @@ View support remains limited to validated projections, joins, predicates, and
 allowlisted scalar functions. Aggregates and subqueries are not supported.
 
 Restore accounts created before trigger support need a local administrator to
-add `TRIGGER` to their existing restore-namespace grant, with grant option.
+add `TRIGGER` to their existing restore-namespace grant, with grant option, only
+when restoring a backup that contains triggers. Table/view-only restores keep
+working without this extra permission.
+After upgrading, `db-agent update check` and `db-agent update now` show the exact
+SQL for the configured account if it needs this grant. Agent startup prints the
+same notice to the service logs, including after automatic updates. These checks
+are read-only; the agent never runs the displayed grant.
+Updates preserve existing database users, configuration, and encryption keys.
+Do not delete them to update the agent.
 Keep this permission separate from the backup account. If binary logging is on,
 trigger restore also requires `log_bin_trust_function_creators` enabled. The
 agent checks this before creating accounts or importing and never changes it.
