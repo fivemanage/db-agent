@@ -5,9 +5,8 @@ It runs as a Windows service or Linux systemd service, with scheduled backups
 and backup history in the dashboard. You can also run backups from the command line.
 
 Backups are compressed and encrypted with AES-256-GCM before upload. Database
-passwords and encryption keys stay on your server. The agent uses a dedicated
-read-only database account and outbound connections; you don't need to open any
-inbound ports.
+passwords stay on your server. The agent uses a dedicated read-only database
+account and outbound connections; you don't need to open any inbound ports.
 
 You can recover backups as SQL files, even on a replacement server without a
 FiveManage connection, using a downloaded backup and your saved recovery key.
@@ -15,8 +14,11 @@ FiveManage connection, using a downloaded backup and your saved recovery key.
 The agent is still in development. Public installers and testing on target
 operating systems are pending. Dashboard restore is not yet ready for production use.
 
-**Keep a recovery-key copy outside this server. Without the original key,
-your backups cannot be decrypted. FiveManage cannot recover or replace it.**
+**You need the original recovery key.** FiveManage stores an encrypted copy by
+default for new databases unless you opt out. An organization owner can download
+that copy, even if the original server is gone. Holding the key allows FiveManage
+to decrypt your backups. If FiveManage doesn't have a saved copy, keep your own
+copy off the server.
 
 ## Requirements
 
@@ -88,13 +90,17 @@ Release builds can include the FiveManage API URL. Development builds require
    this server only, and database administrator credentials are never saved.
 3. Optionally create a restore user for dashboard restores.
 
-Then go back to the database page in the dashboard to finish setup. The
-dashboard shows where the recovery key file is and how to view it. Save a copy
-of the key in a password manager or other storage off this server, confirm that
-you saved it, and select **Finish setup**. The agent checks database access, dump
-tools, the recovery key, and API connectivity. If every check passes, it starts
-the first backup without a restart. If a check fails, the dashboard lists it;
-fix it on the server and try again.
+Then go back to the database page in the dashboard to finish setup. If you
+enabled the managed recovery copy, wait for the page to say FiveManage saved it.
+Otherwise, follow the instructions to save a copy in a password manager or other
+storage off this server and confirm you saved it. Select **Finish setup** to run
+the checks and start the first backup. If a check fails, fix it on the server
+and try again.
+
+For an existing database, an organization owner can sign in again and select
+**Store a copy with FiveManage** in the database's **Settings** tab. Keep the
+original server and key available until the updated agent saves the copy.
+This doesn't change the key or affect existing backups.
 
 To finish in the terminal instead, run `configure --key`. It asks you to paste
 the key from the file to confirm your copy.
@@ -190,15 +196,35 @@ Or recover an already-downloaded encrypted file:
 db-agent restore --file ./backup.dbak --output ./recovered.sql
 ```
 
-On a replacement machine, use the encrypted backup and your original saved key
-file. No enrollment, config, or API connection is needed:
+If the original server is gone, download a retained encrypted backup from
+**Backups**. If FiveManage has a saved copy of your key, sign in again as the
+organization owner and select **Download recovery key** in the database's
+**Settings** tab.
+Otherwise use the original key file you saved off the server.
+
+On a replacement machine, restrict the key file before using it. Don't put the
+key contents in a command.
+
+On Linux or macOS:
 
 ```sh
+chmod 600 ./recovery.key
 db-agent restore --file ./backup.dbak --key-file ./recovery.key --output ./recovered.sql
 ```
 
-Never put key contents in command-line arguments. Key files must be private:
-`0600` on Unix, or protected System/Administrators-only ACLs on Windows.
+On Windows, open PowerShell as Administrator in the download folder. Use the
+actual filenames if your browser renamed the files:
+
+```powershell
+$path = (Resolve-Path -LiteralPath '.\recovery.key').Path
+$acl = Get-Acl -LiteralPath $path
+$acl.SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)', [System.Security.AccessControl.AccessControlSections]::Access)
+Set-Acl -LiteralPath $path -AclObject $acl
+& 'C:\Program Files\db-agent\db-agent.exe' restore --file .\backup.dbak --key-file $path --output .\recovered.sql
+```
+
+Offline recovery needs only the executable and the two files. It doesn't need
+enrollment, config, or an API connection.
 
 **These commands recover SQL; they do not import it or change a database.**
 The agent verifies and decompresses the entire backup before saving the SQL file.

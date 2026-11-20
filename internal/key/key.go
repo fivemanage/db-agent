@@ -27,7 +27,8 @@ func (Key) Format(state fmt.State, _ rune) {
 
 func (k Key) Bytes() [32]byte { return k.material }
 
-// RecoveryString is only for the deliberate, one-time terminal display.
+// RecoveryString encodes the key for a private file, deliberate display, or
+// authorized managed-copy upload. Never log the returned string.
 func (k Key) RecoveryString() string {
 	return Prefix + base64.RawURLEncoding.EncodeToString(k.material[:])
 }

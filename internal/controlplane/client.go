@@ -138,6 +138,9 @@ func (c *Client) request(ctx context.Context, call request) ([]byte, error) {
 	var err error
 	if call.body != nil {
 		body, err = json.Marshal(call.body)
+		if call.path == recoveryKeyPath {
+			defer clear(body)
+		}
 	}
 	if err != nil {
 		return nil, errors.New("cannot encode control-plane request")

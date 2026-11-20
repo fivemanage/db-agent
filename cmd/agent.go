@@ -91,9 +91,24 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 		},
 		restores: restores.Run,
 		setup: func(ctx context.Context) error {
-			return runDashboardSetup(ctx, path, client, setupPollInterval, func(ctx context.Context) {
+			syncCtx, cancelSync := context.WithCancel(ctx)
+			syncDone := make(chan struct{})
+			go func() {
+				defer close(syncDone)
+				runRecoveryKeySync(syncCtx, path, client, errorOutput)
+			}()
+			defer func() {
+				cancelSync()
+				<-syncDone
+			}()
+			err := runDashboardSetup(ctx, path, client, setupPollInterval, func(ctx context.Context) {
 				finishDashboardSetup(ctx, path, client, readiness, output, errorOutput)
 			}, errorOutput)
+			if err != nil {
+				return err
+			}
+			<-syncDone
+			return nil
 		},
 		update: func(ctx context.Context) (bool, error) {
 			effective, err := config.LoadAgent(path)
