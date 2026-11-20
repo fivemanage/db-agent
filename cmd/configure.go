@@ -23,16 +23,16 @@ var configureRestoreAccess bool
 
 var configureCmd = &cobra.Command{
 	Use:   "configure",
-	Short: "Connect a registered agent to explicitly selected local databases",
+	Short: "Manage local database settings and dashboard restore access",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		settings, err := config.LoadDiagnostic(configPath)
 		if err != nil {
 			return err
 		}
+		input := bufio.NewReader(cmd.InOrStdin())
 		if configureRestoreAccess {
-			newSetupOutput(cmd.OutOrStdout()).title("Restore access", "Use an existing restore user for dashboard restores.")
-			return configureLocalRestoreAccess(cmd, settings)
+			return configureLocalRestoreAccess(cmd, input, settings)
 		}
 
 		if err := settings.ValidateAgent(); err != nil {
@@ -45,17 +45,50 @@ var configureCmd = &cobra.Command{
 			return configureRecoveryKey(cmd, config.ResolvePath(configPath))
 		}
 
+		if settings.Database.Validate() == nil && len(settings.Database.Databases) > 0 {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return errors.New("configure requires an interactive terminal; existing settings are preserved")
+			}
+			choice, err := promptConfigureAction(input, cmd.OutOrStdout(), settings)
+			if err != nil {
+				return err
+			}
+			switch choice {
+			case "1":
+			case "2":
+				return configureLocalRestoreAccess(cmd, input, settings)
+			case "3":
+				return nil
+			default:
+				return errors.New("select 1, 2, or 3; existing settings are preserved")
+			}
+		}
+
 		newSetupOutput(cmd.OutOrStdout()).title("Database connection", "Your database login stays on this machine.")
-		return configureLocalDatabase(cmd, settings.Database, false)
+		return configureLocalDatabase(cmd, input, settings.Database, false)
 	},
 }
 
-func configureLocalDatabase(cmd *cobra.Command, previous config.DatabaseConfig, dashboardRestores bool) error {
+func promptConfigureAction(input *bufio.Reader, output io.Writer, settings config.Config) (string, error) {
+	view := newSetupOutput(output)
+	view.title("Agent settings", "Choose what to change. Other settings stay unchanged.")
+	view.info("Saved database connection: " + describeConnection(settings.Database))
+	if settings.Restore.Authorized {
+		view.note("Dashboard restore authorization is saved. Access will be checked when you configure restores.")
+	} else {
+		view.note("Dashboard restores are not enabled.")
+	}
+	view.note("1  Change database connection")
+	view.note("2  Enable or repair dashboard restores")
+	view.note("3  Cancel")
+	return prompt(input, output, "Choose", "3")
+}
+
+func configureLocalDatabase(cmd *cobra.Command, input *bufio.Reader, previous config.DatabaseConfig, dashboardRestores bool) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("configure requires an interactive terminal for hidden password input; alternatively edit database settings in the private config file")
 	}
 
-	input := bufio.NewReader(cmd.InOrStdin())
 	setup := databaseSetup{
 		inspect:   database.Inspect,
 		provision: database.ProvisionBackupAccount,
@@ -366,7 +399,7 @@ func selectDatabases(choice string, visible []string) ([]string, error) {
 
 func init() {
 	configureCmd.Flags().BoolVar(&configureKeyOnly, "key", false, "set up or acknowledge the local recovery key without changing database settings")
-	configureCmd.Flags().BoolVar(&configureRestoreAccess, "restore-access", false, "explicitly authorize a separate local restore provisioning account")
+	configureCmd.Flags().BoolVar(&configureRestoreAccess, "restore-access", false, "enable, check, or repair dashboard restore access using the saved database connection")
 	configureCmd.MarkFlagsMutuallyExclusive("key", "restore-access")
 	rootCmd.AddCommand(configureCmd)
 }

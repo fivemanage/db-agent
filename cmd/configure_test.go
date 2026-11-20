@@ -36,6 +36,32 @@ func setupReport(admin bool) database.Report {
 	return r
 }
 
+func TestConfigureMenuUsesSavedSettingsWithoutAskingForConnectionString(t *testing.T) {
+	for _, answer := range []string{"1\n", "2\n", "\n"} {
+		t.Run(strings.TrimSpace(answer), func(t *testing.T) {
+			settings := installRestoreSettings()
+			var output bytes.Buffer
+			choice, err := promptConfigureAction(bufio.NewReader(strings.NewReader(answer)), &output, settings)
+			want := strings.TrimSpace(answer)
+			if want == "" {
+				want = "3"
+			}
+			if err != nil || choice != want {
+				t.Fatalf("wrong configure selection: %q %v", choice, err)
+			}
+			text := output.String()
+			for _, want := range []string{"Saved database connection: backup@127.0.0.1:3306/game_db", "Change database connection", "Enable or repair dashboard restores", "Cancel"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing settings choice %q", want)
+				}
+			}
+			if strings.Contains(text, "Connection string") || strings.Contains(text, settings.Database.Password) {
+				t.Fatal("settings menu asked for connection credentials or disclosed a password")
+			}
+		})
+	}
+}
+
 func TestWizardNeverSavesSuppliedAdminCredentials(t *testing.T) {
 	for _, test := range []struct {
 		name, input    string

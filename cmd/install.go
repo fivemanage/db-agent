@@ -96,12 +96,13 @@ var installCmd = &cobra.Command{
 
 		output.step(3, 3, "Connect your database")
 		output.note("Your database login is saved on this server only.")
+		input := bufio.NewReader(cmd.InOrStdin())
 		if settings.Database.Validate() == nil && len(settings.Database.Databases) > 0 {
 			output.ok("Using your saved database settings")
 			output.note("To change them, run db-agent configure")
-			err = configureInstallRestoreAccess(cmd, bufio.NewReader(cmd.InOrStdin()), config.DatabaseConfig{})
+			err = configureInstallRestoreAccess(cmd, input, config.DatabaseConfig{})
 		} else {
-			err = configureLocalDatabase(cmd, settings.Database, true)
+			err = configureLocalDatabase(cmd, input, settings.Database, true)
 		}
 		if err != nil {
 			output.note("The agent is running. Finish the database connection with db-agent configure.")

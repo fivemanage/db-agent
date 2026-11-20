@@ -124,11 +124,13 @@ Setup also asks **Create a restore user?** (default no) so you can restore backu
 from the dashboard. The restore user is separate from the read-only backup user
 and can create databases and database users, so keep this machine's database
 admin access protected. You can skip this step and enable restores later by
-rerunning `install`.
+running `configure --restore-access` with the same config.
 
 If setup is interrupted, rerun `install` with the same config, or run
-`configure` to enter the database login again. Both keep your registration,
-database settings, and recovery key. Do not delete a key or pending enrollment
+`configure` to manage the saved database connection or dashboard restore access.
+If no database connection is saved, `configure` starts connection setup.
+Both preserve your registration and recovery key. Database settings change only
+when you confirm a new connection. Do not delete a key or pending enrollment
 file to retry. An existing key is never regenerated.
 
 ## Backups and status
@@ -207,6 +209,13 @@ the dashboard into a new, isolated database using its local key. Your production
 database stays untouched. You decide when to point your application at the
 restored database.
 
+To enable or repair access later, run `db-agent configure --restore-access`.
+It reuses your saved database connection. You can check and re-enable a saved
+restore account, create one if none is saved, or enter an existing dedicated
+account's credentials. Creating an account asks for a one-time admin login,
+which is never saved. Backup access and your recovery key stay unchanged.
+Use the same `--config` path as the agent if you chose a nondefault config.
+
 Dashboard restore still needs production-readiness testing. It imports supported
 tables, views, and row triggers into the new database. Views and triggers use
 destination-only references and a restricted local definer, never the original
@@ -253,9 +262,9 @@ Never paste them into chat, support tickets, or the dashboard.
 
 | Command | Purpose |
 | --- | --- |
-| `db-agent configure` | Change or retry the local database connection |
+| `db-agent configure` | Manage the saved database connection or dashboard restore access |
 | `db-agent configure --key` | Resume recovery-key setup and confirmation |
-| `db-agent configure --restore-access` | Authorize an existing dedicated restore account |
+| `db-agent configure --restore-access` | Enable, check, or repair dashboard restore access |
 | `db-agent agent` | Run in the foreground instead of as an installed service |
 | `db-agent stop` / `db-agent start` | Control the installed service |
 | `db-agent uninstall` | Stop and remove service registration; preserve config, keys, and state |

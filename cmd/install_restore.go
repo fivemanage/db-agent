@@ -31,14 +31,7 @@ func configureInstallRestoreAccess(cmd *cobra.Command, input *bufio.Reader, admi
 	}
 	return setupDashboardRestores(cmd.Context(), input, cmd.OutOrStdout(), settings, admin,
 		func() (string, error) { value, err := term.ReadPassword(int(os.Stdin.Fd())); return string(value), err },
-		restoreInstallSetup{
-			inspect:   database.Inspect,
-			provision: database.ProvisionRestoreAccount,
-			check:     database.CheckRestoreAccess,
-			save: func(access config.RestoreConfig) error {
-				return config.SaveRestoreAccess(configPath, settings.Database, access)
-			},
-		})
+		restoreAccountSetup(configPath, settings.Database))
 }
 
 func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.Writer, settings config.Config, admin config.DatabaseConfig, readSecret func() (string, error), setup restoreInstallSetup) error {
@@ -75,7 +68,7 @@ func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.
 		return err
 	}
 	if !enable {
-		view.info("Skipped. Run db-agent install again to enable dashboard restores later.")
+		view.info("Skipped. Run db-agent configure --restore-access to enable dashboard restores later.")
 		return nil
 	}
 	persist := func(access config.RestoreConfig) error {
@@ -103,7 +96,7 @@ func setupDashboardRestores(ctx context.Context, input *bufio.Reader, output io.
 		return nil
 	}
 	if err := createInstallRestoreAccount(ctx, input, output, settings.Database, admin, readSecret, setup, persist); err != nil {
-		return fmt.Errorf("dashboard restore setup incomplete: %w; backup settings are preserved; rerun db-agent install to resume or continue backup-only", err)
+		return fmt.Errorf("dashboard restore setup incomplete: %w; backup settings are preserved; run db-agent configure --restore-access to resume or continue backup-only", err)
 	}
 	return nil
 }

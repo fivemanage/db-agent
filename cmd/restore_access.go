@@ -15,16 +15,60 @@ import (
 	"golang.org/x/term"
 )
 
-func configureLocalRestoreAccess(cmd *cobra.Command, settings config.Config) error {
+func configureLocalRestoreAccess(cmd *cobra.Command, input *bufio.Reader, settings config.Config) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("restore-access setup requires an interactive local terminal for hidden password entry; no authorization was saved")
 	}
-	return authorizeRestoreAccess(cmd.Context(), bufio.NewReader(cmd.InOrStdin()), cmd.OutOrStdout(), settings.Database,
+	return configureRestoreAccounts(cmd.Context(), input, cmd.OutOrStdout(), settings,
 		func() (string, error) { value, err := term.ReadPassword(int(os.Stdin.Fd())); return string(value), err },
-		database.CheckRestoreAccess,
-		func(access config.RestoreConfig) error {
-			return config.SaveRestoreAccess(configPath, settings.Database, access)
-		})
+		restoreAccountSetup(configPath, settings.Database))
+}
+
+func configureRestoreAccounts(ctx context.Context, input *bufio.Reader, output io.Writer, settings config.Config, readSecret func() (string, error), setup restoreInstallSetup) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := database.ValidateLocalConnection(settings.Database); err != nil {
+		return errors.New("save a valid local database connection with db-agent configure before enabling dashboard restores; existing settings are preserved")
+	}
+	view := newSetupOutput(output)
+	view.title("Dashboard restores", "Use the saved database connection without changing backup access or your recovery key.")
+	view.info("Saved database connection: " + describeConnection(settings.Database))
+	if settings.Restore.User != "" {
+		view.note("1  Check and enable the saved restore account")
+	} else {
+		view.note("1  Create a dedicated restore user")
+	}
+	view.note("2  Use an existing restore account")
+	view.note("3  Cancel")
+	choice, err := prompt(input, output, "Choose", "3")
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch choice {
+	case "1":
+		return setupDashboardRestores(ctx, input, output, settings, config.DatabaseConfig{}, readSecret, setup)
+	case "2":
+		return authorizeRestoreAccess(ctx, input, output, settings.Database, readSecret, setup.check, setup.save)
+	case "3":
+		return nil
+	default:
+		return errors.New("select 1, 2, or 3; existing settings are preserved")
+	}
+}
+
+func restoreAccountSetup(path string, backup config.DatabaseConfig) restoreInstallSetup {
+	return restoreInstallSetup{
+		inspect:   database.Inspect,
+		provision: database.ProvisionRestoreAccount,
+		check:     database.CheckRestoreAccess,
+		save: func(access config.RestoreConfig) error {
+			return config.SaveRestoreAccess(path, backup, access)
+		},
+	}
 }
 
 func authorizeRestoreAccess(ctx context.Context, input *bufio.Reader, output io.Writer, backup config.DatabaseConfig,
