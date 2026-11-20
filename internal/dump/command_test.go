@@ -93,7 +93,7 @@ func TestPrivateOptionsEscapingAndCleanup(t *testing.T) {
 	settings.User = " backup#\"user "
 	settings.Password = " spaces#;\"'\\n\n\r\t\b!include /unsafe "
 	parent := t.TempDir()
-	path, dir, err := createOptions(settings, parent)
+	path, dir, err := createOptions(settings, parent, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +112,46 @@ func TestPrivateOptionsEscapingAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEmptyDir(t, parent)
+}
+
+func TestPrivateOptionsCarryExplicitTLSMode(t *testing.T) {
+	for _, test := range []struct {
+		driver, mode, flags string
+	}{
+		{"mysql", config.TLSVerifyIdentity, "ssl-mode=VERIFY_IDENTITY\n"},
+		{"mariadb", config.TLSVerifyIdentity, "ssl\nssl-verify-server-cert\n"},
+		{"mysql", config.TLSDisabled, "ssl-mode=DISABLED\n"},
+		{"mariadb", config.TLSDisabled, "skip-ssl\n"},
+	} {
+		t.Run(test.driver+"/"+test.mode, func(t *testing.T) {
+			parent := t.TempDir()
+			settings := testSettings()
+			settings.Driver, settings.TLS.Mode = test.driver, test.mode
+			want := test.flags
+			fingerprint := ""
+			if test.mode == config.TLSVerifyIdentity {
+				settings.TLS.CAFile = filepath.Join(parent, "database ca.pem")
+				if test.driver == "mariadb" {
+					if _, _, err := createOptions(settings, parent, ""); !errors.Is(err, ErrTLS) {
+						t.Fatal("verified MariaDB client could start without a certificate pin")
+					}
+					fingerprint = strings.Repeat("a", 64)
+					want += "ssl-fp=" + quoteOption(fingerprint) + "\n"
+				}
+				want += "ssl-ca=" + quoteOption(settings.TLS.CAFile) + "\n"
+			}
+
+			path, dir, err := createOptions(settings, parent, fingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanupOptions(path, dir)
+			contents, err := securefile.Read(path, 4096)
+			if err != nil || !bytes.HasSuffix(contents, []byte(want)) {
+				t.Fatal("dump client options did not preserve the requested TLS policy")
+			}
+		})
+	}
 }
 
 func TestRejectUnsafeScopeAndOptions(t *testing.T) {

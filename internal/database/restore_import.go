@@ -59,7 +59,7 @@ func ImportRestore(ctx context.Context, backup config.DatabaseConfig, access con
 	if statementTimeout == 0 {
 		statementTimeout = DefaultRestoreStatementTimeout
 	}
-	settings := config.DatabaseConfig{Driver: access.Driver, Host: access.Host, Port: access.Port, User: access.User, Password: access.Password}
+	settings := restoreConnection(backup, access)
 	authority, err := openDatabase(settings)
 	if err != nil {
 		return ErrRestoreUnavailable

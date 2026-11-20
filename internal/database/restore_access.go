@@ -63,7 +63,7 @@ func CheckRestoreTriggerAccess(ctx context.Context, backup config.DatabaseConfig
 	if err := access.ValidateFor(backup); err != nil {
 		return err
 	}
-	settings := config.DatabaseConfig{Driver: access.Driver, Host: access.Host, Port: access.Port, User: access.User, Password: access.Password}
+	settings := restoreConnection(backup, access)
 	db, err := openDatabase(settings)
 	if err != nil {
 		return ErrRestoreUnavailable
@@ -72,6 +72,10 @@ func CheckRestoreTriggerAccess(ctx context.Context, backup config.DatabaseConfig
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 	return checkRestoreAccess(ctx, db, settings)
+}
+
+func restoreConnection(backup config.DatabaseConfig, access config.RestoreConfig) config.DatabaseConfig {
+	return config.DatabaseConfig{Driver: access.Driver, Host: access.Host, Port: access.Port, User: access.User, Password: access.Password, TLS: backup.TLS}
 }
 
 func checkRestoreAccess(ctx context.Context, db *sql.DB, settings config.DatabaseConfig) error {

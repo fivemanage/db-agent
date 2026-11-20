@@ -10,38 +10,37 @@ import (
 	"github.com/fivemanage/db-agent/internal/config"
 )
 
+type ParsedConnection struct {
+	Database               config.DatabaseConfig
+	IgnoredConnectionLimit bool
+}
+
 // ParseConnection accepts common oxmysql URI and semicolon connection forms.
-// Transport options are rejected rather than silently dropping TLS or sockets.
-func ParseConnection(value string) (config.DatabaseConfig, error) {
-	c := config.DatabaseConfig{Driver: "mysql", Host: "127.0.0.1", Port: 3306}
+// When TLS is requested, setup must supply a CA file before connecting.
+func ParseConnection(value string) (ParsedConnection, error) {
+	parsed := ParsedConnection{Database: config.DatabaseConfig{Driver: "mysql", Host: "127.0.0.1", Port: 3306}}
+	c := &parsed.Database
+	var rawQuery string
 	invalid := errors.New("invalid connection string; use mysql://user:password@127.0.0.1:3306/database or server=127.0.0.1;port=3306;database=game;userid=user;password=secret")
 	value = strings.TrimSpace(value)
 	if strings.HasPrefix(value, "mysql://") {
 		u, err := url.Parse(value)
 		if err != nil || u.User == nil || u.Hostname() == "" || u.Fragment != "" || u.Opaque != "" {
-			return config.DatabaseConfig{}, invalid
+			return ParsedConnection{}, invalid
 		}
 		c.Host, c.User = u.Hostname(), u.User.Username()
 		c.Password, _ = u.User.Password()
 		if u.Port() != "" {
 			c.Port, err = strconv.Atoi(u.Port())
 			if err != nil {
-				return config.DatabaseConfig{}, invalid
+				return ParsedConnection{}, invalid
 			}
 		}
 		if !strings.HasPrefix(u.Path, "/") || strings.Contains(u.Path[1:], "/") {
-			return config.DatabaseConfig{}, invalid
+			return ParsedConnection{}, invalid
 		}
 		c.Databases = []string{strings.TrimPrefix(u.Path, "/")}
-		query, err := url.ParseQuery(u.RawQuery)
-		if err != nil {
-			return config.DatabaseConfig{}, invalid
-		}
-		for key, values := range query {
-			if key != "charset" || len(values) != 1 || values[0] != "utf8mb4" {
-				return config.DatabaseConfig{}, errors.New("unsupported connection options; enter the local TCP connection manually (TLS/socket options are not imported)")
-			}
-		}
+		rawQuery = u.RawQuery
 	} else {
 		seen := map[string]bool{}
 		for _, part := range strings.Split(value, ";") {
@@ -50,7 +49,7 @@ func ParseConnection(value string) (config.DatabaseConfig, error) {
 			}
 			key, field, ok := strings.Cut(part, "=")
 			if !ok {
-				return config.DatabaseConfig{}, invalid
+				return ParsedConnection{}, invalid
 			}
 			key = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), " ", ""))
 			switch key {
@@ -64,10 +63,10 @@ func ParseConnection(value string) (config.DatabaseConfig, error) {
 				key = "database"
 			case "port":
 			default:
-				return config.DatabaseConfig{}, errors.New("unsupported connection-string field; enter the local TCP connection manually")
+				return ParsedConnection{}, errors.New("unsupported connection-string field; enter the local TCP connection manually")
 			}
 			if seen[key] {
-				return config.DatabaseConfig{}, invalid
+				return ParsedConnection{}, invalid
 			}
 			seen[key] = true
 			field = strings.TrimSpace(field)
@@ -84,15 +83,57 @@ func ParseConnection(value string) (config.DatabaseConfig, error) {
 				var err error
 				c.Port, err = strconv.Atoi(field)
 				if err != nil {
-					return config.DatabaseConfig{}, invalid
+					return ParsedConnection{}, invalid
 				}
 			}
 		}
 	}
-	if err := ValidateLocalConnection(c); err != nil {
-		return config.DatabaseConfig{}, err
+	if err := ValidateLocalConnection(*c); err != nil {
+		return ParsedConnection{}, err
 	}
-	return c, nil
+	if err := parseConnectionOptions(rawQuery, &parsed); err != nil {
+		return ParsedConnection{}, err
+	}
+
+	return parsed, nil
+}
+
+func parseConnectionOptions(rawQuery string, parsed *ParsedConnection) error {
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return errors.New("invalid connection string options; check the query syntax and percent encoding")
+	}
+
+	unsupported := errors.New("unsupported connection options; setup supports local TCP and only imports charset, connectionLimit, and ssl options")
+	for key, values := range query {
+		switch key {
+		case "charset":
+			if len(values) != 1 || values[0] != "utf8mb4" {
+				return unsupported
+			}
+		case "connectionLimit":
+			if len(values) != 1 {
+				return errors.New("connectionLimit must not appear more than once")
+			}
+			// mysql2 uses JavaScript numbers and treats 0 as no pool limit.
+			if _, err := strconv.ParseUint(values[0], 10, 53); err != nil {
+				return errors.New("connectionLimit must be a nonnegative whole number within the supported range")
+			}
+			parsed.IgnoredConnectionLimit = true
+		case "ssl":
+			if len(values) != 1 || values[0] != "true" && values[0] != "false" {
+				return errors.New("ssl must appear once with a value of true or false")
+			}
+			parsed.Database.TLS.Mode = config.TLSDisabled
+			if values[0] == "true" {
+				parsed.Database.TLS.Mode = config.TLSVerifyIdentity
+			}
+		default:
+			return unsupported
+		}
+	}
+
+	return nil
 }
 
 func ValidateLocalConnection(c config.DatabaseConfig) error {

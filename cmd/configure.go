@@ -278,7 +278,25 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 		if readErr != nil {
 			return config.DatabaseConfig{}, errors.New("cannot read connection string from terminal")
 		}
-		candidate, err = database.ParseConnection(secret)
+		parsed, err := database.ParseConnection(secret)
+		if err != nil {
+			return config.DatabaseConfig{}, err
+		}
+		candidate = parsed.Database
+		if candidate.TLS.Mode == config.TLSVerifyIdentity {
+			view.note("SSL is required. Use the PEM CA certificate that verifies your database server's loopback IP.")
+			fallback := ""
+			if previous.TLS.Mode == config.TLSVerifyIdentity {
+				fallback = previous.TLS.CAFile
+			}
+			candidate.TLS.CAFile, err = prompt(input, output, "Absolute path to the CA certificate file", fallback)
+			if err != nil {
+				return config.DatabaseConfig{}, err
+			}
+		}
+		if parsed.IgnoredConnectionLimit {
+			view.note("Ignoring connectionLimit: it only controls your game's connection pool.")
+		}
 	case "2":
 		candidate, err = promptConnection(input, output, previous, readSecret)
 		if err == nil {

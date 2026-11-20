@@ -8,9 +8,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
+
+const (
+	TLSDisabled       = "disabled"
+	TLSVerifyIdentity = "verify_identity"
+)
+
+type DatabaseTLS struct {
+	Mode   string `mapstructure:"mode" yaml:"mode"`
+	CAFile string `mapstructure:"ca_file" yaml:"ca_file,omitempty"`
+}
+
+func (t DatabaseTLS) Validate() error {
+	switch t.Mode {
+	case "", TLSDisabled:
+		if t.CAFile != "" {
+			return errors.New("a database CA file requires verified TLS")
+		}
+	case TLSVerifyIdentity:
+		if !filepath.IsAbs(t.CAFile) || strings.ContainsFunc(t.CAFile, unicode.IsControl) {
+			return errors.New("verified database TLS requires an absolute path to a PEM CA certificate file")
+		}
+	default:
+		return errors.New("database TLS mode must be disabled or verify_identity")
+	}
+	return nil
+}
 
 // SaveDatabase preserves unrelated settings, including fields from newer agents.
 func SaveDatabase(path string, database DatabaseConfig) error {

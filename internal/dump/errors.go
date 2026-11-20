@@ -19,6 +19,7 @@ var (
 	ErrAuthentication = errors.New("dump authentication rejected; check the local backup account password and allowed account host")
 	ErrPrivileges     = errors.New("dump privileges are insufficient; run db-agent test and ask a local administrator to verify the scoped backup grants")
 	ErrConnection     = errors.New("dump could not reach the local database; check the host, port, and database service")
+	ErrTLS            = errors.New("dump TLS connection failed; check that TLS is enabled, the CA file is readable, and the server certificate covers the loopback IP")
 	ErrDatabase       = errors.New("a selected database is unavailable; run db-agent configure to verify the backup scope")
 	ErrFailed         = errors.New("dump client failed; run db-agent test to check compatibility, connectivity, and grants; partial output must be discarded")
 	ErrCleanup        = errors.New("cannot remove private dump credentials; ask a local administrator to inspect the temporary directory before retrying")
@@ -44,6 +45,8 @@ func explainStderr(data []byte) error {
 		return ErrDiskFull
 	case 2002, 2003, 2005, 2006, 2013:
 		return ErrConnection
+	case 2026:
+		return ErrTLS
 	default:
 		return ErrFailed
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +26,50 @@ func TestConnectionPromptNeverEchoesPasswordOrKeepsOldScope(t *testing.T) {
 	_, err = promptConnection(bufio.NewReader(strings.NewReader("\n\n\n")), &output, previous, func() (string, error) { return "", errors.New("new-secret") })
 	if err == nil || strings.Contains(err.Error(), "new-secret") {
 		t.Fatal("raw password read error leaked")
+	}
+}
+
+func TestConnectionStringPromptExplainsIgnoredPoolLimit(t *testing.T) {
+	var output bytes.Buffer
+	input := bufio.NewReader(strings.NewReader("\n"))
+	connection := "mysql://backup:private-pool-password@localhost/game?charset=utf8mb4&connectionLimit=50"
+
+	candidate, err := promptDatabaseConnection(input, &output, config.DatabaseConfig{}, func() (string, error) { return connection, nil })
+
+	if err != nil || candidate.Password != "private-pool-password" {
+		t.Fatal("could not import connection string from hidden input")
+	}
+	text := output.String()
+	for _, want := range []string{"Connection string (hidden)", "Ignoring connectionLimit: it only controls your game's connection pool."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing setup feedback %q", want)
+		}
+	}
+	if strings.Contains(text, candidate.Password) || strings.Contains(text, "connectionLimit=50") {
+		t.Fatal("setup echoed pasted connection data")
+	}
+}
+
+func TestConnectionStringPromptRequiresACertificateForSSL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	for _, answer := range []string{path, "", "relative-ca.pem"} {
+		var output bytes.Buffer
+		input := bufio.NewReader(strings.NewReader("\n" + answer + "\n"))
+		connection := "mysql://backup:private-tls-password@localhost/game?ssl=true"
+
+		candidate, err := promptDatabaseConnection(input, &output, config.DatabaseConfig{}, func() (string, error) { return connection, nil })
+
+		if answer == path {
+			if err != nil || candidate.TLS.Mode != config.TLSVerifyIdentity || candidate.TLS.CAFile != path {
+				t.Fatal("SSL setup did not carry the entered CA path")
+			}
+		} else if err == nil || candidate.Password != "" {
+			t.Fatal("SSL setup accepted a missing or relative CA file")
+		}
+		if !strings.Contains(output.String(), "Absolute path to the CA certificate file") ||
+			strings.Contains(output.String(), "private-tls-password") || err != nil && strings.Contains(err.Error(), "private-tls-password") {
+			t.Fatal("missing SSL prompt or password leaked")
+		}
 	}
 }
 

@@ -112,12 +112,20 @@ never the setup token. Omitting the argument keeps the hidden token prompt.
 Supported connection-string forms include:
 
 ```text
-mysql://user:password@127.0.0.1:3306/game_database
+mysql://user:password@127.0.0.1:3306/game_database?charset=utf8mb4&connectionLimit=50
 server=127.0.0.1;port=3306;database=game_database;userid=user;password=secret
 ```
 
-Percent-encode special characters in URI values. Remote database hosts and
-unsupported connection options are rejected.
+Percent-encode special characters in URI values. Setup ignores `connectionLimit`
+in MySQL URLs because it only controls your game's connection pool.
+Add `ssl=true` to require verified TLS for setup, backups, and dashboard restores.
+Setup asks for the absolute path to a PEM CA certificate file. Keep that file
+readable by the agent service and writable only by an administrator. The database
+certificate must include the loopback IP as an IP subject alternative name
+(`127.0.0.1` for `localhost`, or `::1`).
+If verification fails, the agent won't fall back to an unencrypted connection.
+Use `ssl=false` to explicitly disable TLS. Remote database hosts, sockets, and
+other unsupported connection options are rejected.
 Do not save root or your database administrator account as the backup login.
 
 Setup also asks **Create a restore user?** (default no) so you can restore backups

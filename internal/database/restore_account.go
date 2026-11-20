@@ -34,7 +34,7 @@ func ProvisionRestoreAccount(ctx context.Context, admin, backup config.DatabaseC
 	}
 	adminHost, _ := localTCPHost(admin.Host)
 	backupHost, _ := localTCPHost(backup.Host)
-	if adminHost != backupHost || admin.Port != backup.Port || admin.Driver != backup.Driver {
+	if adminHost != backupHost || admin.Port != backup.Port || admin.Driver != backup.Driver || admin.TLS != backup.TLS {
 		return errors.New("restore setup must use the confirmed local database server; no accounts were created")
 	}
 	if _, err := LocalRestoreAccountSQL(backup, clientHost); err != nil {

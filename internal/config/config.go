@@ -32,12 +32,13 @@ type Config struct {
 }
 
 type DatabaseConfig struct {
-	Driver    string   `mapstructure:"driver" yaml:"driver"`
-	Host      string   `mapstructure:"host" yaml:"host"`
-	Port      int      `mapstructure:"port" yaml:"port"`
-	User      string   `mapstructure:"user" yaml:"user"`
-	Password  string   `mapstructure:"password" yaml:"password"`
-	Databases []string `mapstructure:"databases" yaml:"databases"`
+	Driver    string      `mapstructure:"driver" yaml:"driver"`
+	Host      string      `mapstructure:"host" yaml:"host"`
+	Port      int         `mapstructure:"port" yaml:"port"`
+	User      string      `mapstructure:"user" yaml:"user"`
+	Password  string      `mapstructure:"password" yaml:"password"`
+	Databases []string    `mapstructure:"databases" yaml:"databases"`
+	TLS       DatabaseTLS `mapstructure:"tls" yaml:"tls,omitempty" json:"-"`
 }
 
 type BackupConfig struct {
@@ -278,7 +279,7 @@ func (c DatabaseConfig) Validate() error {
 		return errors.New("database password is required")
 	}
 
-	return nil
+	return c.TLS.Validate()
 }
 
 // LoadDiagnostic reads incomplete setup without suppressing independent checks.

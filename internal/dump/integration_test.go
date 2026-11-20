@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,74 @@ func TestLogicalDumpFixture(t *testing.T) {
 		}
 		assertEmptyDir(t, parent)
 	})
+}
+
+// Use isolated diagnostic fixtures because this test invokes real dump clients.
+func TestLogicalDumpTLSFixture(t *testing.T) {
+	ca := os.Getenv("DB_AGENT_TLS_FIXTURE_CA")
+	if ca == "" {
+		t.Skip("set DB_AGENT_TLS_FIXTURE_CA inside an isolated diagnostic fixture")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	settings := config.DatabaseConfig{
+		Driver: "mysql", Host: "127.0.0.1", Port: 3306, User: "diagnostic_backup", Password: "diagnostics_backup",
+		Databases: []string{"diagnostic_game"},
+		TLS:       config.DatabaseTLS{Mode: config.TLSDisabled},
+	}
+	report := database.Inspect(ctx, settings)
+	if !report.Passed() {
+		t.Fatalf("fixture diagnostics failed before testing TLS: %+v", report.Checks)
+	}
+	settings.Driver = report.Driver
+	tool, check := database.DetectTools(ctx, report.Driver, report.Version)
+	if !check.Passed {
+		t.Fatal(check.Message)
+	}
+	if err := Run(ctx, io.Discard, settings, tool, Options{}); err != nil {
+		t.Fatalf("fixture dump failed before testing TLS: %v", err)
+	}
+
+	verify := func(name, ca string, wantSuccess bool) {
+		t.Run(name, func(t *testing.T) {
+			settings := settings
+			settings.TLS = config.DatabaseTLS{Mode: config.TLSVerifyIdentity, CAFile: ca}
+			report := database.Inspect(ctx, settings)
+			if report.Passed() != wantSuccess {
+				t.Errorf("unexpected TLS connection result: %+v", report.Checks)
+			}
+			var sql bytes.Buffer
+			err := Run(ctx, &sql, settings, tool, Options{})
+			if (err == nil) != wantSuccess || wantSuccess && !strings.Contains(sql.String(), "players") || !wantSuccess && sql.Len() != 0 {
+				t.Errorf("unexpected TLS dump result: %v", err)
+			}
+		})
+	}
+	if os.Getenv("DB_AGENT_TLS_FIXTURE_DISABLED") == "1" {
+		verify("no TLS on server", ca, false)
+		return
+	}
+	if os.Getenv("DB_AGENT_TLS_FIXTURE_UNMATCHED") == "1" {
+		verify("certificate does not cover the loopback IP", ca, false)
+		return
+	}
+	verify("trusted CA", ca, true)
+	verify("untrusted CA", filepath.Join(filepath.Dir(ca), "other-ca.pem"), false)
+	if settings.Driver == "mariadb" {
+		t.Run("dump client rejects changed certificate pin", func(t *testing.T) {
+			settings.TLS = config.DatabaseTLS{Mode: config.TLSVerifyIdentity, CAFile: ca}
+			path, dir, err := createOptions(settings, t.TempDir(), strings.Repeat("0", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanupOptions(path, dir)
+
+			var sql bytes.Buffer
+			if err := execute(ctx, &sql, buildCommand(settings, tool, path, dir), Options{}); err == nil || sql.Len() != 0 {
+				t.Fatal("dump client accepted a certificate that did not match the verified pin")
+			}
+		})
+	}
 }
 
 func fixtureConnection(t *testing.T, settings config.DatabaseConfig) *sql.DB {

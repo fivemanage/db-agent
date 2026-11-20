@@ -135,3 +135,23 @@ func TestRestoreSaveRejectsChangedDatabaseSnapshot(t *testing.T) {
 		t.Fatal("failed restore setup modified configuration")
 	}
 }
+
+func TestRestoreSaveRejectsChangedDatabaseTLSPolicy(t *testing.T) {
+	backup, access := restoreSettings()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := securefile.Create(path, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	changed := backup
+	changed.TLS = DatabaseTLS{Mode: TLSVerifyIdentity, CAFile: filepath.Join(filepath.Dir(path), "ca.pem")}
+	if err := SaveDatabase(path, changed); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveRestoreAccess(path, backup, access); err == nil {
+		t.Fatal("restore access was authorized after its database TLS policy changed")
+	}
+	if err := SaveRestoreAccess(path, changed, access); err != nil {
+		t.Fatalf("restore access could not inherit the saved database TLS policy: %v", err)
+	}
+}

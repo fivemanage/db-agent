@@ -18,6 +18,7 @@ func TestSaveDatabasePreservesSettingsAndPermissions(t *testing.T) {
 	}
 
 	database := DatabaseConfig{Driver: "mariadb", Host: "127.0.0.1", Port: 3306, User: "backup", Password: "secret", Databases: []string{"game"}}
+	database.TLS = DatabaseTLS{Mode: TLSVerifyIdentity, CAFile: filepath.Join(filepath.Dir(path), "ca.pem")}
 	if err := SaveDatabase(path, database); err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +29,9 @@ func TestSaveDatabasePreservesSettingsAndPermissions(t *testing.T) {
 	}
 	if settings.AgentCredential != "dac_existing" || settings.AutoUpdate || settings.Database.Password != "secret" || settings.Database.Databases[0] != "game" {
 		t.Fatal("settings were lost")
+	}
+	if settings.Database.TLS != database.TLS {
+		t.Fatal("database TLS settings were lost")
 	}
 
 	contents, err := os.ReadFile(path)

@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -69,11 +71,38 @@ func openDatabase(settings config.DatabaseConfig) (*sql.DB, error) {
 }
 
 func openDatabaseReadTimeout(settings config.DatabaseConfig, readTimeout time.Duration) (*sql.DB, error) {
+	connector, err := databaseConnector(settings, readTimeout, nil)
+	if err != nil {
+		return nil, err
+	}
+	db := sql.OpenDB(connector)
+	db.SetMaxOpenConns(1)
+
+	return db, nil
+}
+
+func databaseConnector(settings config.DatabaseConfig, readTimeout time.Duration, verifyConnection func(tls.ConnectionState) error) (driver.Connector, error) {
+	if err := settings.TLS.Validate(); err != nil {
+		return nil, err
+	}
+
 	c := mysql.NewConfig()
 	c.User, c.Passwd = settings.User, settings.Password
 	host := settings.Host
 	if strings.EqualFold(host, "localhost") {
 		host = "127.0.0.1"
+	}
+	if settings.TLS.Mode == config.TLSVerifyIdentity {
+		var err error
+		host, err = localTCPHost(host)
+		if err != nil {
+			return nil, err
+		}
+		roots, err := databaseRootCAs(settings.TLS.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		c.TLS = &tls.Config{RootCAs: roots, ServerName: host, VerifyConnection: verifyConnection}
 	}
 	c.Net, c.Addr = "tcp", net.JoinHostPort(host, strconv.Itoa(settings.Port))
 	c.Timeout, c.ReadTimeout, c.WriteTimeout = Timeout, readTimeout, Timeout
@@ -86,10 +115,7 @@ func openDatabaseReadTimeout(settings config.DatabaseConfig, readTimeout time.Du
 		return nil, errors.New("invalid local connection settings; check the host, port, and account")
 	}
 
-	db := sql.OpenDB(connector)
-	db.SetMaxOpenConns(1)
-
-	return db, nil
+	return connector, nil
 }
 
 func unavailable(name, message string) Report {
@@ -203,6 +229,14 @@ func inspect(ctx context.Context, db *sql.DB, settings config.DatabaseConfig) Re
 }
 
 func Explain(err error) string {
+	if errors.Is(err, mysql.ErrNoTLS) {
+		return "Database TLS is required, but the server does not offer it."
+	}
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return "Database TLS certificate verification failed; check the CA file and that the certificate covers the loopback IP."
+	}
+
 	var dbErr *mysql.MySQLError
 	if errors.As(err, &dbErr) {
 		switch dbErr.Number {

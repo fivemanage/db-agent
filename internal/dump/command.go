@@ -83,7 +83,10 @@ func quoteOption(value string) string {
 	return `"` + value + `"`
 }
 
-func createOptions(settings config.DatabaseConfig, parent string) (string, string, error) {
+func createOptions(settings config.DatabaseConfig, parent, fingerprint string) (string, string, error) {
+	if settings.Driver == "mariadb" && settings.TLS.Mode == config.TLSVerifyIdentity && fingerprint == "" {
+		return "", "", ErrTLS
+	}
 	dir, err := os.MkdirTemp(parent, ".db-agent-dump-")
 	if err != nil {
 		return "", "", fileFailure(err)
@@ -110,7 +113,23 @@ func createOptions(settings config.DatabaseConfig, parent string) (string, strin
 	} else {
 		host = net.ParseIP(host).String()
 	}
-	contents := []byte(fmt.Sprintf("[client]\nuser=%s\npassword=%s\nhost=%s\nport=%d\nprotocol=tcp\n", quoteOption(settings.User), quoteOption(settings.Password), quoteOption(host), settings.Port))
+	contents := fmt.Appendf(nil, "[client]\nuser=%s\npassword=%s\nhost=%s\nport=%d\nprotocol=tcp\n", quoteOption(settings.User), quoteOption(settings.Password), quoteOption(host), settings.Port)
+	switch settings.TLS.Mode {
+	case config.TLSVerifyIdentity:
+		if settings.Driver == "mariadb" {
+			contents = append(contents, "ssl\nssl-verify-server-cert\n"...)
+			contents = fmt.Appendf(contents, "ssl-fp=%s\n", quoteOption(fingerprint))
+		} else {
+			contents = append(contents, "ssl-mode=VERIFY_IDENTITY\n"...)
+		}
+		contents = fmt.Appendf(contents, "ssl-ca=%s\n", quoteOption(settings.TLS.CAFile))
+	case config.TLSDisabled:
+		if settings.Driver == "mariadb" {
+			contents = append(contents, "skip-ssl\n"...)
+		} else {
+			contents = append(contents, "ssl-mode=DISABLED\n"...)
+		}
+	}
 	defer clear(contents)
 	file, err := securefile.OpenNew(path)
 	if err == nil {

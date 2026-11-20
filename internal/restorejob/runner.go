@@ -176,7 +176,7 @@ func (r *Runner) execute(ctx context.Context, session *Session, job Job) (err er
 				return ErrState
 			}
 			a, b := current.Database, settings.Database
-			if current.Restore != settings.Restore || a.Driver != b.Driver || a.Host != b.Host || a.Port != b.Port || a.User != b.User || !slices.Equal(a.Databases, b.Databases) {
+			if current.Restore != settings.Restore || a.Driver != b.Driver || a.Host != b.Host || a.Port != b.Port || a.User != b.User || a.TLS != b.TLS || !slices.Equal(a.Databases, b.Databases) {
 				return config.ErrRestoreAuthorization
 			}
 			if current.Encryption != settings.Encryption {

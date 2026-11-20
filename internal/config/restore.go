@@ -82,7 +82,7 @@ func SaveRestoreAccess(path string, expected DatabaseConfig, access RestoreConfi
 			return errors.New("cannot validate private config for restore authorization")
 		}
 		a, b := current.Database, expected
-		if a.Driver != b.Driver || a.Host != b.Host || a.Port != b.Port || a.User != b.User || a.Password != b.Password || !slices.Equal(a.Databases, b.Databases) {
+		if a.Driver != b.Driver || a.Host != b.Host || a.Port != b.Port || a.User != b.User || a.Password != b.Password || a.TLS != b.TLS || !slices.Equal(a.Databases, b.Databases) {
 			return errors.New("database settings changed during restore setup; rerun configure --restore-access; existing settings are preserved")
 		}
 		var section *yaml.Node

@@ -37,7 +37,17 @@ func Run(ctx context.Context, dst io.Writer, settings config.DatabaseConfig, too
 	if err := ctx.Err(); err != nil {
 		return contextFailure(err)
 	}
-	path, dir, err := createOptions(settings, options.TempDir)
+	var fingerprint string
+	if settings.Driver == "mariadb" && settings.TLS.Mode == config.TLSVerifyIdentity {
+		fingerprint, err = database.VerifiedTLSFingerprint(ctx, settings)
+		if err != nil {
+			if ctx.Err() != nil {
+				return contextFailure(ctx.Err())
+			}
+			return fmt.Errorf("%w: %w", ErrTLS, err)
+		}
+	}
+	path, dir, err := createOptions(settings, options.TempDir, fingerprint)
 	if err != nil {
 		return err
 	}
