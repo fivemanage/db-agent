@@ -19,7 +19,7 @@ type Tool struct {
 var clientVersion = regexp.MustCompile(`(?i)(?:Distrib|Ver|from)\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)
 
 func DetectTools(ctx context.Context, driver, version string) (Tool, Check) {
-	return detectTools(ctx, driver, version, exec.LookPath, toolVersion)
+	return detectTools(ctx, driver, version, lookupTool, toolVersion)
 }
 
 func toolVersion(ctx context.Context, path string) (string, error) {
@@ -110,7 +110,7 @@ func detectTools(ctx context.Context, driver, version string, lookup func(string
 	} else if found {
 		check.Message = "Dump client could not run or has an unsupported version/family; install a client matching the database server version and check PATH." + note
 	} else {
-		check.Message = "No logical dump client on PATH. Install MySQL client utilities (mysqldump; mysql-client/mysql-community-client) or MariaDB client tools (mariadb-dump; mariadb-client), matching your server. On Windows add the installation's bin directory to the service/system PATH." + note
+		check.Message = "No logical dump client on PATH. Install MySQL client utilities (mysqldump; mysql-client/mysql-community-client) or MariaDB client tools (mariadb-dump; mariadb-client), matching your server. On Windows add the installation's bin directory to the system PATH and restart the db-agent service if it still isn't detected." + note
 	}
 
 	return Tool{}, check
