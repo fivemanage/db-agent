@@ -102,7 +102,9 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 				<-syncDone
 			}()
 			err := runDashboardSetup(ctx, path, client, setupPollInterval, func(ctx context.Context) {
-				finishDashboardSetup(ctx, path, client, readiness, output, errorOutput)
+				refreshDashboardSetupReadiness(ctx, path, client, readiness, errorOutput)
+			}, func(ctx context.Context) {
+				startFirstBackupAfterSetup(ctx, path, client, readiness, output, errorOutput)
 			}, errorOutput)
 			if err != nil {
 				return err

@@ -54,16 +54,17 @@ func (e *TransportError) Error() string {
 func (e *TransportError) Unwrap() error { return e.cause }
 
 type Client struct {
-	baseURL     string
-	credential  string
-	version     string
-	http        *http.Client
-	logger      *slog.Logger
-	maxAttempts int
-	backoff     time.Duration
-	budget      time.Duration
-	cooldownMu  sync.Mutex
-	cooldown    time.Time
+	baseURL       string
+	credential    string
+	version       string
+	http          *http.Client
+	logger        *slog.Logger
+	maxAttempts   int
+	backoff       time.Duration
+	budget        time.Duration
+	cooldownMu    sync.Mutex
+	cooldown      time.Time
+	heartbeatSync chan chan struct{}
 	// Configure before starting workers; the callback runs synchronously and
 	// must apply only validated policy without printing local secret material.
 	OnOverrides func(context.Context, config.DashboardOverrides) error
@@ -94,10 +95,11 @@ func newClient(apiURL, credential, version string, logger *slog.Logger) *Client 
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		logger:      logger,
-		maxAttempts: 3,
-		backoff:     time.Second,
-		budget:      45 * time.Second,
+		logger:        logger,
+		maxAttempts:   3,
+		backoff:       time.Second,
+		budget:        45 * time.Second,
+		heartbeatSync: make(chan chan struct{}),
 	}
 }
 

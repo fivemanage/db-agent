@@ -25,15 +25,17 @@ type pendingSetupReport struct {
 }
 
 // runDashboardSetup polls while local setup is incomplete. It reports setup
-// progress, runs dashboard finish requests, and calls finished once when setup
-// becomes complete during this run, so readiness never stays at the startup check.
-func runDashboardSetup(ctx context.Context, path string, plane setupPlane, interval time.Duration, finished func(context.Context), errorOutput io.Writer) error {
+// progress, runs dashboard finish requests, calls beforeComplete to refresh
+// readiness and sync heartbeat before reporting completion, and calls finished
+// once after completion is acknowledged.
+func runDashboardSetup(ctx context.Context, path string, plane setupPlane, interval time.Duration, beforeComplete, finished func(context.Context), errorOutput io.Writer) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var pending *pendingSetupReport
 	var lastStatusError string
 	incomplete := false
+	readinessRefreshed := false
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -63,6 +65,18 @@ func runDashboardSetup(ctx context.Context, path string, plane setupPlane, inter
 			incomplete = true
 		}
 
+		// Clear the pre-setup error heartbeat before reporting setup complete
+		// so the dashboard does not flash a stale failure when setupPending clears.
+		if status.Complete && incomplete && pending == nil && !readinessRefreshed {
+			if beforeComplete != nil {
+				beforeComplete(ctx)
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			readinessRefreshed = true
+		}
+
 		response, err := plane.PollSetup(ctx, status)
 		switch {
 		case ctx.Err() != nil:
@@ -77,7 +91,7 @@ func runDashboardSetup(ctx context.Context, path string, plane setupPlane, inter
 			}
 		case status.Complete:
 			if pending == nil {
-				if incomplete {
+				if incomplete && finished != nil {
 					finished(ctx)
 				}
 				return nil

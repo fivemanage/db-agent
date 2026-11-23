@@ -71,7 +71,7 @@ func TestDashboardSetupReportsFailedFinishAndKeepsPolling(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		done <- runDashboardSetup(ctx, path, plane, time.Millisecond, func(context.Context) { t.Error("failed finish completed setup") }, io.Discard)
+		done <- runDashboardSetup(ctx, path, plane, time.Millisecond, func(context.Context) { t.Error("failed finish refreshed readiness") }, func(context.Context) { t.Error("failed finish completed setup") }, io.Discard)
 	}()
 	<-reported
 	time.Sleep(20 * time.Millisecond)
@@ -94,10 +94,13 @@ func TestDashboardSetupReportsFailedFinishAndKeepsPolling(t *testing.T) {
 	}
 }
 
-func TestDashboardSetupRefreshesReadinessOnceWhenSetupCompletes(t *testing.T) {
+func TestDashboardSetupRefreshesReadinessBeforeReportingComplete(t *testing.T) {
 	path := setupConfig(t)
-	finished := 0
+	var events []string
 	plane := &fakeSetupPlane{respond: func(count int, status controlplane.SetupStatus) (controlplane.SetupPollResponse, error) {
+		if status.Complete {
+			events = append(events, "poll-complete")
+		}
 		if count == 2 {
 			// Simulate a completed acknowledgement, for example from db-agent configure --key.
 			settings, err := config.LoadDiagnostic(path)
@@ -111,10 +114,22 @@ func TestDashboardSetupRefreshesReadinessOnceWhenSetupCompletes(t *testing.T) {
 		return controlplane.SetupPollResponse{Protocol: 1}, nil
 	}}
 
-	err := runDashboardSetup(context.Background(), path, plane, time.Millisecond, func(context.Context) { finished++ }, io.Discard)
+	err := runDashboardSetup(
+		context.Background(),
+		path,
+		plane,
+		time.Millisecond,
+		func(context.Context) { events = append(events, "refresh-readiness") },
+		func(context.Context) { events = append(events, "start-first-backup") },
+		io.Discard,
+	)
 
-	if err != nil || finished != 1 {
-		t.Fatalf("completion did not refresh readiness exactly once: finished=%d err=%v", finished, err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "refresh-readiness,poll-complete,start-first-backup"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("completion order = %q, want %q", got, want)
 	}
 	if last := plane.polls[len(plane.polls)-1]; !last.Complete {
 		t.Fatal("completed setup was not reported to the dashboard")
@@ -127,7 +142,7 @@ func TestDashboardSetupStopsQuietlyWhenBackendIsUnsupported(t *testing.T) {
 		return controlplane.SetupPollResponse{}, &controlplane.ResponseError{StatusCode: http.StatusNotFound}
 	}}
 
-	err := runDashboardSetup(context.Background(), path, plane, time.Millisecond, func(context.Context) { t.Error("unsupported backend completed setup") }, io.Discard)
+	err := runDashboardSetup(context.Background(), path, plane, time.Millisecond, func(context.Context) { t.Error("unsupported backend refreshed readiness") }, func(context.Context) { t.Error("unsupported backend completed setup") }, io.Discard)
 
 	if err != nil || len(plane.polls) != 1 {
 		t.Fatalf("unsupported setup endpoint was not treated as optional: %v", err)

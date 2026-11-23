@@ -218,3 +218,61 @@ func TestHeartbeatProblemsCannotContainRawSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncHeartbeatFlushesTransitionWithoutWaitingForTick(t *testing.T) {
+	observed := make(chan heartbeatRequest, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request heartbeatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		observed <- request
+		io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	c := testClient(t, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	state := State{Status: Error, Problem: SetupIncomplete}
+	current := func() State {
+		mu.Lock()
+		defer mu.Unlock()
+		return state
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.runHeartbeat(ctx, current, nil, nil, nil)
+	}()
+
+	first := <-observed
+	if first.Status != Error {
+		t.Fatalf("initial status = %s, want error", first.Status)
+	}
+
+	mu.Lock()
+	state = State{Status: Idle}
+	mu.Unlock()
+
+	syncCtx, syncCancel := context.WithTimeout(ctx, time.Second)
+	defer syncCancel()
+	c.SyncHeartbeat(syncCtx)
+
+	second := <-observed
+	if second.Status != Idle || second.LastError != "" {
+		t.Fatalf("synced heartbeat = %+v, want idle with empty error", second)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat worker did not stop")
+	}
+}

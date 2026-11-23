@@ -91,6 +91,24 @@ type Result struct {
 	Err        error
 }
 
+// SyncHeartbeat requests one immediate heartbeat from the active RunHeartbeat
+// worker and waits until that attempt finishes or ctx is canceled.
+func (c *Client) SyncHeartbeat(ctx context.Context) {
+	if c == nil || c.heartbeatSync == nil {
+		return
+	}
+	done := make(chan struct{})
+	select {
+	case c.heartbeatSync <- done:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
 // RunHeartbeat samples current before each poll and calls report synchronously.
 // A source updated by other workers must be concurrency-safe.
 func (c *Client) RunHeartbeat(ctx context.Context, current func() State, report func(Result)) error {
@@ -105,12 +123,22 @@ func (c *Client) runHeartbeat(ctx context.Context, current func() State, report 
 	if current == nil {
 		return errors.New("heartbeat requires a current-state source")
 	}
+	var pendingSync chan struct{}
+	defer func() {
+		if pendingSync != nil {
+			close(pendingSync)
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		state := current()
 		err := c.Heartbeat(ctx, state)
+		if pendingSync != nil {
+			close(pendingSync)
+			pendingSync = nil
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -137,6 +165,9 @@ func (c *Client) runHeartbeat(ctx context.Context, current func() State, report 
 			select {
 			case <-ctx.Done():
 				return nil
+			case done := <-c.heartbeatSync:
+				pendingSync = done
+				break wait
 			case _, ok := <-ticks:
 				if !ok {
 					return nil

@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/fivemanage/db-agent/internal/backup"
 	"github.com/fivemanage/db-agent/internal/config"
 	"github.com/fivemanage/db-agent/internal/controlplane"
 	"github.com/fivemanage/db-agent/internal/diagnostic"
 )
+
+const setupHeartbeatSyncTimeout = 5 * time.Second
 
 func applyAgentOverrides(ctx context.Context, path string, scheduler *backup.Scheduler, overrides config.DashboardOverrides) error {
 	if err := ctx.Err(); err != nil {
@@ -64,9 +67,9 @@ func reportAutomaticBackup(err error, output, errorOutput io.Writer) {
 	}
 }
 
-// finishDashboardSetup refreshes heartbeat readiness after setup completes and
-// starts the first backup without a service restart.
-func finishDashboardSetup(ctx context.Context, path string, client *controlplane.Client, readiness *heartbeatReadiness, output, errorOutput io.Writer) {
+// refreshDashboardSetupReadiness reloads diagnostics and flushes one heartbeat
+// before setup reports complete so the dashboard never sees a stale setup error.
+func refreshDashboardSetupReadiness(ctx context.Context, path string, client *controlplane.Client, readiness *heartbeatReadiness, errorOutput io.Writer) {
 	settings, err := config.LoadAgent(path)
 	if err != nil {
 		fmt.Fprintf(errorOutput, "Setup finished, but the config could not be reloaded: %v\n", err)
@@ -76,13 +79,22 @@ func finishDashboardSetup(ctx context.Context, path string, client *controlplane
 	if ctx.Err() != nil {
 		return
 	}
+
+	syncCtx, cancel := context.WithTimeout(ctx, setupHeartbeatSyncTimeout)
+	defer cancel()
+	client.SyncHeartbeat(syncCtx)
+}
+
+// startFirstBackupAfterSetup launches the initial backup once setup completion
+// has been reported and refreshed prerequisites pass.
+func startFirstBackupAfterSetup(ctx context.Context, path string, client *controlplane.Client, readiness *heartbeatReadiness, output, errorOutput io.Writer) {
 	if readiness.get().Status != controlplane.Idle {
 		fmt.Fprintln(errorOutput, "Setup finished, but prerequisite checks no longer pass; the first backup was not started. Run db-agent test.")
 		return
 	}
 
 	fmt.Fprintln(output, "Setup finished. Starting the first backup.")
-	err = runBackupNow(ctx, path, client)
+	err := runBackupNow(ctx, path, client)
 	if ctx.Err() == nil {
 		reportAutomaticBackup(err, output, errorOutput)
 	}
