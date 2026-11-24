@@ -74,10 +74,11 @@ type Plan struct {
 }
 
 type plannedStatement struct {
-	sql    string
-	offset int64
-	size   int
-	digest [32]byte
+	sql           string
+	offset        int64
+	size          int
+	digest        [32]byte
+	generatedCols []int
 }
 
 func (p *Plan) String() string   { return "private restore plan" }
@@ -151,6 +152,7 @@ func (p *Plan) ForEach(ctx context.Context, consume func(string) error) error {
 			name := insert.Table.Expr.(sqlparser.TableName)
 			name.Qualifier = sqlparser.NewIdentifierCS(p.destination)
 			insert.Table.Expr = name
+			rewriteGeneratedInsertDefaults(insert, statement.generatedCols)
 			sql = sqlparser.String(insert)
 		}
 		if err := ctx.Err(); err != nil {
@@ -188,10 +190,11 @@ type builder struct {
 }
 
 type tablePlan struct {
-	create  *sqlparser.CreateTable
-	data    []plannedStatement
-	rows    int64
-	parents map[string]bool
+	create        *sqlparser.CreateTable
+	data          []plannedStatement
+	rows          int64
+	parents       map[string]bool
+	generatedCols []int
 }
 
 func Prepare(ctx context.Context, input io.Reader, options Options) (*Plan, error) {
@@ -239,7 +242,7 @@ func prepare(ctx context.Context, input io.Reader, backing io.ReaderAt, options 
 				}
 				continue
 			}
-			node, err := parser.ParseStrictDDL(statement)
+			node, err := parser.ParseStrictDDL(normalizeCreateTableDDL(statement))
 			if err != nil {
 				// Parser diagnostics contain raw SQL, including customer data.
 				return fmt.Errorf("SQL statement %d cannot be parsed completely: %w", ordinal, ErrUnsupported)

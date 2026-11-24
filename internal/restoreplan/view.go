@@ -91,7 +91,7 @@ func (b *builder) tableStub(name string, node *sqlparser.CreateTable) error {
 			return ErrUnsupported
 		}
 		o := column.Type.Options
-		if o != nil && (o.Default != nil || o.OnUpdate != nil || o.Autoincrement || o.Comment != nil || o.KeyOpt != sqlparser.ColKeyNone) {
+		if o != nil && (o.As != nil || o.Default != nil || o.OnUpdate != nil || o.Autoincrement || o.Comment != nil || o.KeyOpt != sqlparser.ColKeyNone) {
 			return ErrUnsupported
 		}
 		seen[column.Name.Lowered()] = true

@@ -202,7 +202,7 @@ func TestUnsupportedTableDefinitionsAndDependencies(t *testing.T) {
 		"CREATE TABLE players (id INT) ENGINE=InnoDB TABLESPACE outside;",
 		"CREATE TABLE players (id INT) ENGINE=InnoDB PARTITION BY HASH(id) PARTITIONS 2;",
 		"CREATE TABLE players (id INT DEFAULT (GET_LOCK('x',0))) ENGINE=InnoDB;",
-		"CREATE TABLE players (id INT, calc INT AS (id+1)) ENGINE=InnoDB;",
+		"CREATE TABLE players (id INT, calc INT AS (GET_LOCK('x',0))) ENGINE=InnoDB;",
 		"CREATE TABLE players (id INT, CHECK (GET_LOCK('x',0))) ENGINE=InnoDB;",
 		"CREATE TABLE players (id INT INVISIBLE) ENGINE=InnoDB;",
 		"CREATE TABLE IF NOT EXISTS players (id INT) ENGINE=InnoDB;",
