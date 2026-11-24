@@ -17,6 +17,8 @@ var identityPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var backupPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 var checksumPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
+const maxStateBytes = 64 << 10
+
 type entry struct {
 	Version    int                                `json:"version"`
 	Initiation controlplane.InitiateBackupRequest `json:"initiation"`
@@ -38,7 +40,7 @@ func (u *Uploader) artifactPath() string {
 }
 
 func (u *Uploader) load() (*entry, error) {
-	data, err := securefile.Read(u.statePath(), 4096)
+	data, err := securefile.Read(u.statePath(), maxStateBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -72,6 +74,12 @@ func (e *entry) valid() bool {
 	if initiation.EstimatedSizeBytes != nil && *initiation.EstimatedSizeBytes < 0 {
 		return false
 	}
+	if initiation.UploadMode != "" && initiation.UploadMode != "single" && initiation.UploadMode != "multipart" {
+		return false
+	}
+	if initiation.PartSizeBytes < 0 || (initiation.PartSizeBytes > 0 && initiation.UploadMode != "multipart") {
+		return false
+	}
 
 	if e.Phase != "building" && e.Phase != "ready" && e.Phase != "report" {
 		return false
@@ -91,8 +99,11 @@ func (e *entry) valid() bool {
 		if !checksumPattern.MatchString(completion.Checksum) || e.Problem != controlplane.NoProblem {
 			return false
 		}
+		if len(completion.Parts) > 0 && !controlplane.ValidCompletedParts(completion.Parts) {
+			return false
+		}
 	case "failed":
-		if completion.Checksum != "" ||
+		if completion.Checksum != "" || len(completion.Parts) > 0 ||
 			(e.Problem != controlplane.BackupFailed && e.Problem != controlplane.UploadFailed) {
 			return false
 		}
@@ -110,7 +121,7 @@ func (u *Uploader) save(e *entry) error {
 	}
 
 	data, err := json.Marshal(e)
-	if err != nil || len(data) > 4096 {
+	if err != nil || len(data) > maxStateBytes {
 		return ErrLocal
 	}
 

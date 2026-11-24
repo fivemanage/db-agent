@@ -180,9 +180,9 @@ func TestRunnerMultiGiBLimits(t *testing.T) {
 		}
 		want := limit
 		if want == 0 {
-			want = 8 << 30
+			want = restoreplan.DefaultMaxInputBytes
 		}
-		if runner.options.MaxSQLBytes != want || runner.options.Download.MaxOutputBytes != want || runner.options.Download.MaxInputBytes != 8<<30 {
+		if runner.options.MaxSQLBytes != want || runner.options.Download.MaxOutputBytes != want || runner.options.Download.MaxInputBytes != restoreplan.DefaultMaxInputBytes {
 			t.Fatal("download, decompression, and preflight limits disagree")
 		}
 	}

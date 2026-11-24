@@ -18,8 +18,8 @@ import (
 
 const (
 	DefaultTimeout        = 2 * time.Hour
-	DefaultMaxOutputBytes = int64(16 << 30)
-	DefaultMaxInputBytes  = int64(1 << 30)
+	DefaultMaxOutputBytes = int64(64 << 30)
+	DefaultMaxInputBytes  = int64(16 << 30)
 	DefaultReserveBytes   = uint64(256 << 20)
 )
 

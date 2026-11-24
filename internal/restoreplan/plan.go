@@ -27,7 +27,7 @@ var (
 )
 
 const (
-	DefaultMaxInputBytes     = int64(8 << 30)
+	DefaultMaxInputBytes     = int64(16 << 30)
 	DefaultMaxStatementBytes = 4 << 20
 	DefaultMaxTables         = 4096
 	DefaultMaxStatements     = 1000000

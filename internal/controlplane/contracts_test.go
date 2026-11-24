@@ -143,6 +143,103 @@ func TestUnsafeBackupRequestsNeverReachNetwork(t *testing.T) {
 	}
 }
 
+func TestMultipartBackupContracts(t *testing.T) {
+	key, err := NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expires := time.Now().Add(time.Hour).UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/backups/initiate":
+			var in InitiateBackupRequest
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.UploadMode != "multipart" || in.PartSizeBytes != 64<<20 {
+				t.Errorf("unexpected multipart initiate payload: %+v (%v)", in, err)
+			}
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(InitiateBackupResponse{
+				BackupID:      "backup_mp",
+				UploadMode:    "multipart",
+				PartSizeBytes: 64 << 20,
+				MaxSizeBytes:  16 << 30,
+				ExpiresAt:     expires,
+				Parts: []MultipartPartURL{
+					{PartNumber: 1, UploadURL: "https://storage.example/part-1?sig=secret"},
+					{PartNumber: 2, UploadURL: "https://storage.example/part-2?sig=secret"},
+				},
+			})
+		case "/api/v1/backups/backup_mp/parts":
+			var body struct {
+				PartNumbers []int `json:"part_numbers"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.PartNumbers) != 2 || body.PartNumbers[0] != 3 || body.PartNumbers[1] != 4 {
+				t.Errorf("unexpected part sign request: %+v (%v)", body, err)
+			}
+			json.NewEncoder(w).Encode(SignBackupPartsResponse{
+				ExpiresAt: expires,
+				Parts: []MultipartPartURL{
+					{PartNumber: 3, UploadURL: "https://storage.example/part-3?sig=secret"},
+					{PartNumber: 4, UploadURL: "https://storage.example/part-4?sig=secret"},
+				},
+			})
+		case "/api/v1/backups/backup_mp/complete":
+			var in CompleteBackupRequest
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil || len(in.Parts) != 2 || in.Parts[0].PartNumber != 1 || in.Parts[1].ETag != "etag2" {
+				t.Errorf("unexpected multipart complete payload: %+v (%v)", in, err)
+			}
+			io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	c := testClient(t, server.URL)
+
+	started, err := c.InitiateBackup(context.Background(), InitiateBackupRequest{
+		RequestID:     key,
+		StartedAt:     time.Now().UTC(),
+		UploadMode:    "multipart",
+		PartSizeBytes: 64 << 20,
+	})
+	if err != nil || started.BackupID != "backup_mp" || started.UploadMode != "multipart" || len(started.Parts) != 2 {
+		t.Fatalf("multipart initiation failed: %+v %v", started, err)
+	}
+
+	signed, err := c.SignBackupParts(context.Background(), started.BackupID, []int{3, 4})
+	if err != nil || len(signed.Parts) != 2 || signed.Parts[0].PartNumber != 3 {
+		t.Fatalf("part signing failed: %+v %v", signed, err)
+	}
+
+	if err := c.CompleteBackup(context.Background(), started.BackupID, CompleteBackupRequest{
+		Status:          "success",
+		SizeBytes:       100,
+		DurationSeconds: 1.5,
+		Checksum:        "sha256:" + strings.Repeat("a", 64),
+		Parts: []CompletedPart{
+			{PartNumber: 1, ETag: "etag1"},
+			{PartNumber: 2, ETag: "etag2"},
+		},
+	}); err != nil {
+		t.Fatalf("multipart completion failed: %v", err)
+	}
+
+	if _, err := c.SignBackupParts(context.Background(), started.BackupID, []int{1, 1}); err == nil {
+		t.Fatal("duplicate part numbers accepted")
+	}
+	if err := c.CompleteBackup(context.Background(), started.BackupID, CompleteBackupRequest{
+		Status:          "success",
+		SizeBytes:       100,
+		DurationSeconds: 1,
+		Checksum:        "sha256:" + strings.Repeat("a", 64),
+		Parts:           []CompletedPart{{PartNumber: 2, ETag: "etag2"}},
+	}); err == nil {
+		t.Fatal("non-contiguous completed parts accepted")
+	}
+}
+
 func TestUnsafeTransferURLsAreRejectedWithoutEchoingSignatures(t *testing.T) {
 	for _, target := range []string{"http://storage.example/private-signature", "https://user:private-signature@storage.example/object", "https://storage.example/object#private-signature"} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

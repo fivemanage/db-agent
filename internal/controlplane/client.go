@@ -126,6 +126,8 @@ type request struct {
 	body                                           any
 	enrollment                                     bool
 	created                                        bool
+	maxRequestBytes                                int
+	maxResponseBytes                               int
 }
 
 func (c *Client) request(ctx context.Context, call request) ([]byte, error) {
@@ -134,6 +136,11 @@ func (c *Client) request(ctx context.Context, call request) ([]byte, error) {
 	}
 	if call.credential == "" && !(call.method == http.MethodGet && call.path == "/api/v1/agent/register") {
 		return nil, errors.New("authenticated control-plane request requires a credential")
+	}
+
+	maxRequestBytes := call.maxRequestBytes
+	if maxRequestBytes <= 0 {
+		maxRequestBytes = 4096
 	}
 
 	var body []byte
@@ -147,7 +154,7 @@ func (c *Client) request(ctx context.Context, call request) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("cannot encode control-plane request")
 	}
-	if len(body) > 4096 {
+	if len(body) > maxRequestBytes {
 		return nil, errors.New("control-plane request exceeds the protocol size limit")
 	}
 
@@ -251,13 +258,18 @@ func (c *Client) send(ctx context.Context, call request, body []byte) ([]byte, e
 		return nil, err, retry, retryAfter
 	}
 
-	contents, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+	maxResponseBytes := call.maxResponseBytes
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = 4096
+	}
+
+	contents, err := io.ReadAll(io.LimitReader(response.Body, int64(maxResponseBytes)+1))
 	if err != nil {
 		return nil, &TransportError{cause: err}, true, 0
 	}
 
 	var result map[string]json.RawMessage
-	if len(contents) > 4096 || json.Unmarshal(contents, &result) != nil || result == nil {
+	if len(contents) > maxResponseBytes || json.Unmarshal(contents, &result) != nil || result == nil {
 		return nil, errors.New("control plane returned an invalid response; check the final API endpoint (expected a bounded JSON object)"), false, 0
 	}
 

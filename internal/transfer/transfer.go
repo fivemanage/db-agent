@@ -23,6 +23,7 @@ type ControlPlane interface {
 
 type Options struct {
 	MaxBytes         int64
+	PartSize         int64
 	BytesPerSecond   int64
 	MaxAge           time.Duration
 	SessionTimeout   time.Duration
@@ -39,13 +40,16 @@ type Uploader struct {
 
 func New(dir string, plane ControlPlane, options Options) (*Uploader, error) {
 	if dir == "" || plane == nil ||
-		options.MaxBytes < 0 || options.BytesPerSecond < 0 ||
+		options.MaxBytes < 0 || options.PartSize < 0 || options.BytesPerSecond < 0 ||
 		options.MaxAge < 0 || options.SessionTimeout < 0 || options.FreeSpaceReserve < 0 {
 		return nil, errors.New("invalid backup transfer settings")
 	}
 
 	if options.MaxBytes == 0 {
-		options.MaxBytes = 1 << 30
+		options.MaxBytes = DefaultMaxBytes
+	}
+	if options.PartSize == 0 {
+		options.PartSize = DefaultPartSize
 	}
 	if options.MaxAge == 0 {
 		options.MaxAge = 24 * time.Hour
@@ -146,7 +150,7 @@ func (u *session) run(ctx context.Context, source io.ReadCloser, k key.Key, comp
 		return err
 	}
 
-	metadata, err := u.stage(ctx, source, k, compression)
+	metadata, parts, uploadFailure, err := u.stageOrStream(ctx, source, k, compression, e)
 	// Join the producer before any report/retry networking. A failed downstream
 	// write must not leave a dump blocked on its pipe during an API outage.
 	if closeErr := source.Close(); err == nil {
@@ -155,6 +159,9 @@ func (u *session) run(ctx context.Context, source io.ReadCloser, k key.Key, comp
 	if err != nil {
 		e.Completion.DurationSeconds = time.Since(e.Initiation.StartedAt).Seconds()
 		e.Phase = "report"
+		if uploadFailure {
+			e.Completion.Problem = controlplane.UploadFailed
+		}
 
 		if saveErr := u.save(e); saveErr != nil {
 			return saveErr
@@ -166,8 +173,31 @@ func (u *session) run(ctx context.Context, source io.ReadCloser, k key.Key, comp
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if errors.Is(err, controlplane.ErrCredentialRejected) {
+			return err
+		}
 
-		return errors.Join(&safeError{ErrBackup, err}, u.resume(ctx, e))
+		wrapped := error(&safeError{ErrBackup, err})
+		if uploadFailure {
+			wrapped = &safeError{ErrUpload, err}
+		}
+		return errors.Join(wrapped, u.resume(ctx, e))
+	}
+
+	if len(parts) > 0 {
+		e.Phase = "report"
+		e.Completion = controlplane.CompleteBackupRequest{
+			Status:          "success",
+			SizeBytes:       metadata.SizeBytes,
+			DurationSeconds: time.Since(e.Initiation.StartedAt).Seconds(),
+			Checksum:        metadata.Checksum,
+			Parts:           parts,
+		}
+		if err := u.save(e); err != nil {
+			return err
+		}
+
+		return u.resume(ctx, e)
 	}
 
 	e.Phase = "ready"
@@ -196,21 +226,21 @@ func (u *Uploader) headroom() error {
 	return nil
 }
 
-func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression) (metadata artifact.Metadata, err error) {
+func (u *session) stageOrStream(ctx context.Context, source io.ReadCloser, k key.Key, compression artifact.Compression, e *entry) (metadata artifact.Metadata, parts []controlplane.CompletedPart, uploadFailure bool, err error) {
 	if err := os.MkdirAll(u.dir, 0700); err != nil {
-		return artifact.Metadata{}, err
+		return artifact.Metadata{}, nil, false, err
 	}
 	if err := remove(u.artifactPath()); err != nil {
-		return artifact.Metadata{}, err
+		return artifact.Metadata{}, nil, false, err
 	}
 
 	file, err := securefile.OpenNew(u.artifactPath())
 	if err != nil {
-		return artifact.Metadata{}, err
+		return artifact.Metadata{}, nil, false, err
 	}
 	defer file.Close()
 	defer func() {
-		if err != nil {
+		if err != nil || len(parts) > 0 {
 			file.Close()
 			err = errors.Join(err, remove(u.artifactPath()))
 		}
@@ -227,27 +257,41 @@ func (u *Uploader) stage(ctx context.Context, source io.ReadCloser, k key.Key, c
 		}
 	}()
 
-	destination := &limitedWriter{
-		dst:       file,
-		remaining: u.options.MaxBytes,
-		reserve:   u.options.FreeSpaceReserve,
+	writer := &streamWriter{
+		ctx:      ctx,
+		u:        u,
+		e:        e,
+		file:     file,
+		partSize: u.options.PartSize,
+		maxBytes: u.options.MaxBytes,
+		reserve:  u.options.FreeSpaceReserve,
 		free: func() (uint64, error) {
 			return freeSpace(u.dir)
 		},
 	}
-	metadata, err = artifact.Encrypt(ctx, destination, source, k, compression)
+	defer func() {
+		_ = writer.closeFile()
+	}()
+	metadata, err = artifact.Encrypt(ctx, writer, source, k, compression)
 	if err != nil {
-		return artifact.Metadata{}, err
+		return artifact.Metadata{}, nil, writer.uploadErr, err
 	}
 
-	if err := file.Sync(); err != nil {
-		return artifact.Metadata{}, err
-	}
-	if err := file.Close(); err != nil {
-		return artifact.Metadata{}, err
+	if writer.multipart {
+		if err := writer.flushPart(); err != nil {
+			return artifact.Metadata{}, nil, true, err
+		}
+		return metadata, writer.completed, false, nil
 	}
 
-	return metadata, nil
+	if err := writer.file.Sync(); err != nil {
+		return artifact.Metadata{}, nil, false, err
+	}
+	if err := writer.closeFile(); err != nil {
+		return artifact.Metadata{}, nil, false, err
+	}
+
+	return metadata, nil, false, nil
 }
 
 type limitedWriter struct {
