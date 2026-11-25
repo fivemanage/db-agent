@@ -120,7 +120,7 @@ func createInstallRestoreAccount(ctx context.Context, input *bufio.Reader, outpu
 		if err != nil {
 			return err
 		}
-		view.ask("Admin password", "hidden")
+		view.ask("Admin password", "hidden, leave blank if none")
 		admin.Password, err = readSecret()
 		fmt.Fprintln(output)
 		if err != nil {

@@ -179,6 +179,10 @@ func setupDatabase(ctx context.Context, input *bufio.Reader, output io.Writer, c
 		return errors.New("admin logins are never saved; let setup create a backup user, or connect with an existing backup user")
 	}
 
+	if candidate.Password == "" {
+		return errors.New("saved backup logins require a password; let setup create a backup user, or use a password-protected backup login")
+	}
+
 	if !report.Passed() {
 		printFailedChecks(output, report.Checks)
 		return errors.New("this login is missing backup permissions; ask your database administrator to grant them, then try again")
@@ -315,7 +319,7 @@ func promptDatabaseConnection(input *bufio.Reader, output io.Writer, previous co
 	if err != nil {
 		return config.DatabaseConfig{}, err
 	}
-	if err := database.ValidateLocalConnection(candidate); err != nil {
+	if err := database.ValidateSetupConnection(candidate); err != nil {
 		return config.DatabaseConfig{}, err
 	}
 
@@ -357,7 +361,7 @@ func promptConnection(input *bufio.Reader, output io.Writer, candidate config.Da
 		return config.DatabaseConfig{}, err
 	}
 
-	newSetupOutput(output).ask("Password", "hidden")
+	newSetupOutput(output).ask("Password", "hidden, leave blank if none")
 	candidate.Password, err = readSecret()
 	fmt.Fprintln(output)
 	if err != nil {

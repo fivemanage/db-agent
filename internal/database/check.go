@@ -50,7 +50,7 @@ func (r Report) Passed() bool {
 
 // Inspect accepts both candidate wizard settings and persisted local settings.
 func Inspect(ctx context.Context, settings config.DatabaseConfig) Report {
-	if err := settings.Validate(); err != nil {
+	if err := settings.ValidateConnection(); err != nil {
 		return unavailable("Database connectivity", err.Error())
 	}
 

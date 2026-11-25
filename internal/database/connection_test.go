@@ -24,6 +24,26 @@ func TestParseGameServerConnection(t *testing.T) {
 	}
 }
 
+func TestParseConnectionAllowsPasswordlessSetupLogin(t *testing.T) {
+	for _, value := range []string{
+		"mysql://root@localhost/game_db",
+		"mysql://root:@127.0.0.1:3306/game_db?charset=utf8mb4",
+		"server=127.0.0.1;database=game_db;userid=root;",
+		"server=127.0.0.1;database=game_db;userid=root;password=;",
+	} {
+		parsed, err := ParseConnection(value)
+		if err != nil {
+			t.Fatalf("passwordless setup connection %q was rejected: %v", value, err)
+		}
+		if parsed.Database.User != "root" || parsed.Database.Password != "" || len(parsed.Database.Databases) != 1 || parsed.Database.Databases[0] != "game_db" {
+			t.Fatalf("unexpected parsed fields for %q: %+v", value, parsed.Database)
+		}
+		if err := ValidateLocalConnection(parsed.Database); err == nil {
+			t.Fatalf("persisted local validation accepted empty password for %q", value)
+		}
+	}
+}
+
 func TestParseConnectionIgnoresApplicationPoolLimit(t *testing.T) {
 	for _, test := range []struct {
 		name, query string

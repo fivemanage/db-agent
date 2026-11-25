@@ -258,7 +258,9 @@ func (c BackupConfig) DumpDuration() (time.Duration, error) {
 	return duration, nil
 }
 
-func (c DatabaseConfig) Validate() error {
+// ValidateConnection checks local connection fields while allowing an empty
+// password for ephemeral setup or admin logins such as passwordless local root.
+func (c DatabaseConfig) ValidateConnection() error {
 	if c.Driver != "mysql" && c.Driver != "mariadb" {
 		return errors.New("database driver must be mysql or mariadb")
 	}
@@ -275,11 +277,19 @@ func (c DatabaseConfig) Validate() error {
 		return errors.New("database user is required")
 	}
 
+	return c.TLS.Validate()
+}
+
+func (c DatabaseConfig) Validate() error {
+	if err := c.ValidateConnection(); err != nil {
+		return err
+	}
+
 	if c.Password == "" {
 		return errors.New("database password is required")
 	}
 
-	return c.TLS.Validate()
+	return nil
 }
 
 // LoadDiagnostic reads incomplete setup without suppressing independent checks.

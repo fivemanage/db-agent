@@ -29,7 +29,7 @@ func LocalRestoreAccountSQL(backup config.DatabaseConfig, clientHost string) ([]
 // ProvisionRestoreAccount never alters existing identities or backup grants.
 // The callback must verify live restore access before saving it privately.
 func ProvisionRestoreAccount(ctx context.Context, admin, backup config.DatabaseConfig, clientHost string, persist func(config.RestoreConfig) error) error {
-	if err := ValidateLocalConnection(admin); err != nil {
+	if err := ValidateSetupConnection(admin); err != nil {
 		return err
 	}
 	adminHost, _ := localTCPHost(admin.Host)

@@ -193,6 +193,55 @@ func TestWizardRetriesFailedConnectionBeforeSavingExistingAccount(t *testing.T) 
 	}
 }
 
+func TestWizardAcceptsPasswordlessAdminAndRejectsSavingPasswordlessBackup(t *testing.T) {
+	t.Run("passwordless root creates password-protected backup user", func(t *testing.T) {
+		var output bytes.Buffer
+		saved := false
+		setup := databaseSetup{
+			inspect: func(_ context.Context, c config.DatabaseConfig) database.Report { return setupReport(c.User == "root") },
+			provision: func(_ context.Context, admin config.DatabaseConfig, _, _, _ string, persist func(config.DatabaseConfig) error) error {
+				if admin.User != "root" || admin.Password != "" {
+					t.Fatal("unexpected ephemeral admin credentials")
+				}
+				backup := admin
+				backup.User, backup.Password = "db_agent_backup", "generated-private-password"
+				return persist(backup)
+			},
+			save: func(c config.DatabaseConfig) error {
+				saved = true
+				if c.User != "db_agent_backup" || c.Password != "generated-private-password" {
+					t.Fatal("backup user was not saved with generated password")
+				}
+				return nil
+			},
+		}
+		err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("1\ny\n")), &output, config.DatabaseConfig{}, func() (string, error) { return "mysql://root@localhost/game_db", nil }, setup)
+		if err != nil || !saved {
+			t.Fatalf("passwordless admin setup failed: saved=%t err=%v", saved, err)
+		}
+	})
+
+	t.Run("passwordless non-admin login is never saved", func(t *testing.T) {
+		var output bytes.Buffer
+		saved := false
+		setup := databaseSetup{
+			inspect: func(context.Context, config.DatabaseConfig) database.Report { return setupReport(false) },
+			provision: func(context.Context, config.DatabaseConfig, string, string, string, func(config.DatabaseConfig) error) error {
+				t.Fatal("non-admin login should not provision")
+				return nil
+			},
+			save: func(config.DatabaseConfig) error {
+				saved = true
+				return nil
+			},
+		}
+		err := configureDatabase(context.Background(), bufio.NewReader(strings.NewReader("2\n127.0.0.1\n3306\nbackup\ngame_db\nn\n")), &output, config.DatabaseConfig{}, func() (string, error) { return "", nil }, setup)
+		if err == nil || saved || !strings.Contains(err.Error(), "require a password") {
+			t.Fatalf("expected passwordless saved backup rejection, got saved=%t err=%v", saved, err)
+		}
+	})
+}
+
 func TestConnectionSummaryHidesSecretsAndEscapesTerminalContent(t *testing.T) {
 	var output bytes.Buffer
 	connection := "mysql://backup%1B%5B31m:private-review-password@127.0.0.1/game"
@@ -269,7 +318,7 @@ func TestWizardDoesNotGuessUnknownClientHost(t *testing.T) {
 		if admin {
 			user = "root"
 		}
-		err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader("y\n")), &output, config.DatabaseConfig{Host: "localhost", User: user, Databases: []string{"game"}}, setup)
+		err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader("y\n")), &output, config.DatabaseConfig{Host: "localhost", User: user, Password: "secret", Databases: []string{"game"}}, setup)
 		if (err == nil) != !admin || saved != !admin || strings.Contains(output.String(), "CREATE USER") {
 			t.Fatalf("unknown client host guessed or existing account blocked: admin=%t saved=%t err=%v", admin, saved, err)
 		}
@@ -283,7 +332,7 @@ func TestWizardRequiresExistingBackupAccountConfirmation(t *testing.T) {
 			inspect: func(context.Context, config.DatabaseConfig) database.Report { return setupReport(false) },
 			save:    func(config.DatabaseConfig) error { t.Fatal("unconfirmed account saved"); return nil },
 		}
-		if err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader(confirm)), &output, config.DatabaseConfig{User: "backup", Databases: []string{"game"}}, setup); err == nil {
+		if err := setupDatabase(context.Background(), bufio.NewReader(strings.NewReader(confirm)), &output, config.DatabaseConfig{User: "backup", Password: "secret", Databases: []string{"game"}}, setup); err == nil {
 			t.Fatal("confirmation not required")
 		}
 	}

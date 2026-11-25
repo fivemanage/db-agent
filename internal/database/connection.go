@@ -88,7 +88,7 @@ func ParseConnection(value string) (ParsedConnection, error) {
 			}
 		}
 	}
-	if err := ValidateLocalConnection(*c); err != nil {
+	if err := ValidateSetupConnection(*c); err != nil {
 		return ParsedConnection{}, err
 	}
 	if err := parseConnectionOptions(rawQuery, &parsed); err != nil {
@@ -136,8 +136,10 @@ func parseConnectionOptions(rawQuery string, parsed *ParsedConnection) error {
 	return nil
 }
 
-func ValidateLocalConnection(c config.DatabaseConfig) error {
-	if err := c.Validate(); err != nil {
+// ValidateSetupConnection validates local TCP setup/admin connections, allowing
+// an empty password for ephemeral logins that are never persisted.
+func ValidateSetupConnection(c config.DatabaseConfig) error {
+	if err := c.ValidateConnection(); err != nil {
 		return err
 	}
 	// Arbitrary hostnames could later resolve off-machine and leak admin secrets.
@@ -153,4 +155,11 @@ func ValidateLocalConnection(c config.DatabaseConfig) error {
 		}
 	}
 	return nil
+}
+
+func ValidateLocalConnection(c config.DatabaseConfig) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	return ValidateSetupConnection(c)
 }

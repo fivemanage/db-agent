@@ -148,7 +148,7 @@ type accountExecutor interface {
 // The server must still report the client host used in the approved SQL preview.
 // On failure, only identities successfully created by this call are removed.
 func ProvisionBackupAccount(ctx context.Context, admin config.DatabaseConfig, driver, version, clientHost string, persist func(config.DatabaseConfig) error) error {
-	if err := ValidateLocalConnection(admin); err != nil {
+	if err := ValidateSetupConnection(admin); err != nil {
 		return err
 	}
 	statements, err := LocalBackupAccountSQL(driver, version, admin.Databases, admin.Host, clientHost)
