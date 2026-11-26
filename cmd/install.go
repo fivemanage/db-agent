@@ -109,10 +109,15 @@ var installCmd = &cobra.Command{
 			return err
 		}
 
-		if current, err := config.LoadDiagnostic(path); err == nil && current.Validate() == nil {
-			output.section("You're all set")
-			output.info("Setup is already finished. Check backups in the dashboard or with db-agent status.")
-			return nil
+		if current, err := config.LoadDiagnostic(path); err == nil {
+			if current.Database.Validate() == nil && len(current.Database.Databases) > 0 {
+				ensureInstallDumpTool(cmd.Context(), input, cmd.OutOrStdout(), current.Database)
+			}
+			if current.Validate() == nil {
+				output.section("You're all set")
+				output.info("Setup is already finished. Check backups in the dashboard or with db-agent status.")
+				return nil
+			}
 		}
 
 		output.section("Finish setup in your dashboard")

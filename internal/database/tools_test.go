@@ -135,3 +135,83 @@ func TestLookupFromSearchPathPreservesProcessOrderAndSkipsUntrustedMachineDirs(t
 		}
 	})
 }
+
+func TestDiscoverOffPathToolsChecksTrustedVersionsAndNeverRunsUntrusted(t *testing.T) {
+	ranUntrusted := false
+	candidates := []candidateBinary{
+		{name: "mysqldump", path: `C:\xampp\mysql\bin\mysqldump.exe`, dir: `C:\xampp\mysql\bin`, trusted: false},
+		{name: "mariadb-dump", path: `C:\Program Files\MariaDB 10.6\bin\mariadb-dump.exe`, dir: `C:\Program Files\MariaDB 10.6\bin`, trusted: true},
+		{name: "mariadb-dump", path: `C:\Program Files\MariaDB 11.4\bin\mariadb-dump.exe`, dir: `C:\Program Files\MariaDB 11.4\bin`, trusted: true},
+	}
+
+	got := discoverOffPathTools(
+		context.Background(),
+		"mariadb",
+		"11.4.2",
+		func([]string) []candidateBinary { return candidates },
+		func(_ context.Context, path string) (string, error) {
+			if strings.Contains(path, "xampp") {
+				ranUntrusted = true
+				return "", errors.New("must not execute untrusted binary")
+			}
+			if strings.Contains(path, "10.6") {
+				return "mariadb-dump Ver 10.19 Distrib 10.6.18-MariaDB", nil
+			}
+			return "mariadb-dump from 11.4.8-MariaDB, client 10.19", nil
+		},
+	)
+
+	if ranUntrusted {
+		t.Fatal("executed untrusted off-PATH binary")
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected untrusted warning + compatible trusted tool, got %+v", got)
+	}
+	if got[0].Trusted || got[0].Tool.Version != "" {
+		t.Fatalf("expected first result to be untrusted without execution: %+v", got[0])
+	}
+	if !got[1].Trusted || got[1].Tool.Version != "11.4.8" {
+		t.Fatalf("expected second result to be compatible trusted 11.4.8 tool: %+v", got[1])
+	}
+}
+
+func TestAppendWindowsPathEntryPreservesExpandPlaceholdersAndAvoidsDuplicates(t *testing.T) {
+	raw := `%SystemRoot%\system32;%SystemRoot%;C:\Program Files\db-agent`
+
+	updated, changed, err := appendWindowsPathEntry(raw, `C:\Program Files\MariaDB 11.4\bin\`)
+	if err != nil || !changed || updated != raw+`;C:\Program Files\MariaDB 11.4\bin` {
+		t.Fatalf("append failed: updated=%q changed=%t err=%v", updated, changed, err)
+	}
+
+	same, changed, err := appendWindowsPathEntry(updated, `c:\program files\mariadb 11.4\bin`)
+	if err != nil || changed || same != updated {
+		t.Fatalf("duplicate entry was added: same=%q changed=%t err=%v", same, changed, err)
+	}
+
+	if _, _, err := appendWindowsPathEntry(raw, `\\fileserver\share\bin`); err == nil {
+		t.Fatal("UNC path was accepted for System PATH")
+	}
+}
+
+func TestPlanDumpToolInstallSelectsMatchingLinuxPackage(t *testing.T) {
+	for _, test := range []struct {
+		name, driver, manager, wantPkg string
+	}{
+		{"apt mariadb", "mariadb", "apt-get", "mariadb-client"},
+		{"apt mysql", "mysql", "apt-get", "mysql-client"},
+		{"dnf mariadb", "mariadb", "dnf", "mariadb"},
+		{"apk mysql", "mysql", "apk", "mysql-client"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, ok := planDumpToolInstall(test.driver, func(bin string) (string, error) {
+				if bin == test.manager {
+					return "/usr/bin/" + bin, nil
+				}
+				return "", errors.New("not found")
+			})
+			if !ok || plan.Manager != test.manager || plan.Package != test.wantPkg || !strings.Contains(plan.Summary, test.wantPkg) {
+				t.Fatalf("unexpected plan: %+v ok=%t", plan, ok)
+			}
+		})
+	}
+}

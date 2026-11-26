@@ -80,22 +80,8 @@ func detectTools(ctx context.Context, driver, version string, lookup func(string
 			continue
 		}
 
-		family := "mysql"
-		if strings.Contains(strings.ToLower(output), "mariadb") {
-			family = "mariadb"
-		}
-
-		matches := clientVersion.FindAllStringSubmatch(output, -1)
-		if len(matches) == 0 {
-			continue
-		}
-
-		// MariaDB prints a protocol version before the actual Distrib version.
-		client := matches[len(matches)-1][1]
-		major, minor := versionNumbers(client)
-		serverMajor, serverMinor := versionNumbers(version)
-		compatible := driver == family && major == serverMajor && minor >= serverMinor
-		if !compatible {
+		client, ok := matchToolVersion(driver, version, output)
+		if !ok {
 			continue
 		}
 
@@ -114,4 +100,30 @@ func detectTools(ctx context.Context, driver, version string, lookup func(string
 	}
 
 	return Tool{}, check
+}
+
+func matchToolVersion(driver, serverVersion, output string) (string, bool) {
+	if driver == "" || serverVersion == "" {
+		return "", false
+	}
+
+	family := "mysql"
+	if strings.Contains(strings.ToLower(output), "mariadb") {
+		family = "mariadb"
+	}
+
+	matches := clientVersion.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+
+	// MariaDB prints a protocol version before the actual Distrib version.
+	client := matches[len(matches)-1][1]
+	major, minor := versionNumbers(client)
+	serverMajor, serverMinor := versionNumbers(serverVersion)
+	if driver != family || major != serverMajor || minor < serverMinor {
+		return "", false
+	}
+
+	return client, true
 }
