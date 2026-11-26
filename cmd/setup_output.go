@@ -190,6 +190,75 @@ func (o setupOutput) spin(label string) (stop func()) {
 	}
 }
 
+// progress renders an in-place transfer bar on live terminals until finish is
+// called. Redirected/non-live output stays silent so logs receive only final lines.
+func (o setupOutput) progress(label string) (update func(downloaded, total int64), finish func()) {
+	if !o.live {
+		return func(int64, int64) {}, func() {}
+	}
+
+	const width = 24
+	icons := o.icons()
+	frame := 0
+	var mu sync.Mutex
+	closed := false
+
+	update = func(downloaded, total int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			return
+		}
+
+		if total > 0 {
+			clamped := downloaded
+			if clamped < 0 {
+				clamped = 0
+			}
+			if clamped > total {
+				clamped = total
+			}
+			filled := int(int64(width) * clamped / total)
+			percent := int(100 * clamped / total)
+			bar := o.styled(strings.Repeat(icons.full, filled), "36") + o.styled(strings.Repeat(icons.empty, width-filled), "90")
+			fmt.Fprintf(o.writer, "\r\x1b[2K  %s  %s  %s  %s", bar, o.styled(fmt.Sprintf("%3d%%", percent), "1"), o.styled(fmt.Sprintf("%s / %s", formatBytes(clamped), formatBytes(total)), "2"), label)
+			return
+		}
+
+		glyph := icons.spinner[frame%len(icons.spinner)]
+		frame++
+		fmt.Fprintf(o.writer, "\r\x1b[2K  %s %s  %s", o.styled(glyph, "36"), label, o.styled(formatBytes(downloaded), "2"))
+	}
+
+	finish = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			return
+		}
+		closed = true
+		fmt.Fprint(o.writer, "\r\x1b[2K")
+	}
+
+	return update, finish
+}
+
+func formatBytes(bytes int64) string {
+	if bytes < 0 {
+		bytes = 0
+	}
+	const mib = 1024 * 1024
+	const kib = 1024
+	switch {
+	case bytes >= mib:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mib))
+	case bytes >= kib:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
 func (o setupOutput) ask(label, hint string) {
 	if hint != "" {
 		hint = " " + o.styled("("+hint+")", "2")

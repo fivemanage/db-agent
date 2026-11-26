@@ -121,6 +121,45 @@ func TestLiveSpinnerClearsItsLineWhenStopped(t *testing.T) {
 	}
 }
 
+func TestLiveProgressBarRendersKnownAndUnknownTotalsAndClears(t *testing.T) {
+	var buffer bytes.Buffer
+	output := setupOutput{writer: &buffer, live: true, glyphs: &asciiGlyphs}
+
+	update, finish := output.progress("Downloading v0.3.2")
+	update(5*1024*1024, 10*1024*1024)
+	update(10*1024*1024, 10*1024*1024)
+	finish()
+	finish()
+	output.ok("Downloaded v0.3.2")
+
+	text := buffer.String()
+	for _, want := range []string{"############............   50%  5.0 MB / 10.0 MB  Downloading v0.3.2", "########################  100%  10.0 MB / 10.0 MB  Downloading v0.3.2"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in progress output: %q", want, text)
+		}
+	}
+	if !strings.HasSuffix(text, "\r\x1b[2K  + Downloaded v0.3.2\n") {
+		t.Fatalf("progress did not clear cleanly: %q", text)
+	}
+
+	var unknown bytes.Buffer
+	unknownOut := setupOutput{writer: &unknown, live: true, glyphs: &asciiGlyphs}
+	u2, f2 := unknownOut.progress("Downloading v0.3.2")
+	u2(2*1024*1024, -1)
+	f2()
+	if !strings.Contains(unknown.String(), "Downloading v0.3.2  2.0 MB") {
+		t.Fatalf("unexpected unknown-total progress: %q", unknown.String())
+	}
+
+	var plain bytes.Buffer
+	u3, f3 := newSetupOutput(&plain).progress("Downloading v0.3.2")
+	u3(5*1024*1024, 10*1024*1024)
+	f3()
+	if plain.Len() != 0 {
+		t.Fatalf("non-live progress wrote terminal output: %q", plain.String())
+	}
+}
+
 type lockedBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer

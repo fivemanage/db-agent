@@ -108,6 +108,10 @@ func TestCheckAndStageVerifiedArtifact(t *testing.T) {
 	defer server.Close()
 	manifest = sign(t, Manifest{Version: "1.1.0", OS: "linux", Arch: "amd64", URL: server.URL + "/artifact", SHA256: hex.EncodeToString(checksum[:])}, privateKey)
 	client := Client{HTTP: server.Client(), PublicKey: publicKey, Version: "1.0.0", OS: "linux", Arch: "amd64", ManifestURL: server.URL + "/manifest"}
+	var reports [][2]int64
+	client.OnProgress = func(downloaded, total int64) {
+		reports = append(reports, [2]int64{downloaded, total})
+	}
 	got, newer, err := client.Check(context.Background())
 	if err != nil || !newer {
 		t.Fatalf("Check() = %v, %v", newer, err)
@@ -117,6 +121,9 @@ func TestCheckAndStageVerifiedArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(path)
+	if len(reports) < 2 || reports[0][0] != 0 || reports[len(reports)-1][0] != int64(len(artifact)) || reports[len(reports)-1][1] != int64(len(artifact)) {
+		t.Fatalf("unexpected progress reports: %v", reports)
+	}
 	contents, err := os.ReadFile(path)
 	if err != nil || string(contents) != string(artifact) {
 		t.Fatalf("staged artifact = %q, %v", contents, err)

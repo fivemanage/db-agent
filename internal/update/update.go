@@ -90,6 +90,8 @@ type Client struct {
 	Arch        string
 	ManifestURL string
 	Credential  string
+	// OnProgress reports staged download progress; total is -1 when unknown.
+	OnProgress func(downloaded, total int64)
 }
 
 func (c Client) platform() (string, string) {
@@ -271,7 +273,14 @@ func (c Client) Stage(ctx context.Context, manifest Manifest, executablePath str
 	}
 
 	hash := sha256.New()
-	count, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(res.Body, maxArtifactBytes+1))
+	var dest io.Writer = io.MultiWriter(file, hash)
+	var progress *progressWriter
+	if c.OnProgress != nil {
+		progress = &progressWriter{total: res.ContentLength, notify: c.OnProgress}
+		progress.notify(0, res.ContentLength)
+		dest = io.MultiWriter(file, hash, progress)
+	}
+	count, copyErr := io.Copy(dest, io.LimitReader(res.Body, maxArtifactBytes+1))
 	if copyErr != nil {
 		err = fmt.Errorf("download update: %w", copyErr)
 		return "", err
@@ -280,6 +289,9 @@ func (c Client) Stage(ctx context.Context, manifest Manifest, executablePath str
 	if count > maxArtifactBytes {
 		err = errors.New("update artifact is too large")
 		return "", err
+	}
+	if progress != nil {
+		progress.finish(count)
 	}
 
 	if hex.EncodeToString(hash.Sum(nil)) != manifest.SHA256 {
@@ -298,6 +310,28 @@ func (c Client) Stage(ctx context.Context, manifest Manifest, executablePath str
 	complete = true
 
 	return path, nil
+}
+
+type progressWriter struct {
+	written int64
+	total   int64
+	last    time.Time
+	notify  func(downloaded, total int64)
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	w.written += int64(len(p))
+	now := time.Now()
+	if now.Sub(w.last) >= 50*time.Millisecond {
+		w.last = now
+		w.notify(w.written, w.total)
+	}
+	return len(p), nil
+}
+
+func (w *progressWriter) finish(count int64) {
+	w.written = count
+	w.notify(count, w.total)
 }
 
 func requireHTTPS(raw string) error {

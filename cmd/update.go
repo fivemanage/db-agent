@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,39 +37,68 @@ func newUpdateClient(settings config.Config) (update.Client, error) {
 }
 
 func checkAndMaybeInstall(ctx context.Context, path string, settings config.Config, install, restartAgent bool) (bool, error) {
+	available, _, err := runUpdate(ctx, path, settings, install, restartAgent, nil)
+	return available, err
+}
+
+func runUpdate(ctx context.Context, path string, settings config.Config, install, restartAgent bool, output io.Writer) (bool, string, error) {
 	client, err := newUpdateClient(settings)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
-	manifest, available, err := client.Check(ctx)
-	if err != nil || !available || !install {
-		return available, err
+	var view setupOutput
+	if output != nil {
+		view = newSetupOutput(output)
 	}
+
+	stopCheck := view.spin("Checking for updates")
+	manifest, available, err := client.Check(ctx)
+	stopCheck()
+	if err != nil || !available || !install {
+		return available, manifest.Version, err
+	}
+
 	resolvedConfig, err := filepath.Abs(config.ResolvePath(path))
 	if err != nil {
-		return false, errors.New("cannot resolve update operation state")
+		return false, "", errors.New("cannot resolve update operation state")
 	}
 	unlock, err := operation.TryLock(filepath.Join(filepath.Dir(resolvedConfig), "backup-transfer"))
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer unlock()
 
 	executablePath, err := os.Executable()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	executablePath, err = filepath.EvalSymlinks(executablePath)
 	if err != nil {
-		return false, err
+		return false, "", err
+	}
+
+	if output != nil {
+		onProgress, finishProgress := view.progress("Downloading v" + displayText(manifest.Version))
+		client.OnProgress = onProgress
+		defer finishProgress()
+		stagedPath, err := client.Stage(ctx, manifest, executablePath)
+		finishProgress()
+		if err != nil {
+			return false, "", err
+		}
+		view.ok("Downloaded and verified v" + displayText(manifest.Version))
+		return launchUpdateHelper(executablePath, stagedPath, resolvedConfig, manifest, restartAgent)
 	}
 
 	stagedPath, err := client.Stage(ctx, manifest, executablePath)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
+	return launchUpdateHelper(executablePath, stagedPath, resolvedConfig, manifest, restartAgent)
+}
 
+func launchUpdateHelper(executablePath, stagedPath, resolvedConfig string, manifest update.Manifest, restartAgent bool) (bool, string, error) {
 	serviceName := os.Getenv("DB_AGENT_SERVICE_NAME")
 	if err := update.LaunchHelper(executablePath, stagedPath, manifest.SHA256, manifest.Version, update.Restart{
 		ServiceName: serviceName,
@@ -76,10 +106,10 @@ func checkAndMaybeInstall(ctx context.Context, path string, settings config.Conf
 		NoRestart:   !restartAgent && serviceName == "",
 	}); err != nil {
 		os.Remove(stagedPath)
-		return false, err
+		return false, "", err
 	}
 
-	return true, nil
+	return true, manifest.Version, nil
 }
 
 var updateCmd = &cobra.Command{Use: "update", Short: "Check for or install a signed agent update"}
@@ -95,14 +125,15 @@ var updateCheckCmd = &cobra.Command{
 		}
 
 		printRestoreUpgradeNotice(cmd.Context(), cmd.OutOrStdout(), settings, database.CheckRestoreTriggerAccess)
-		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, false, false)
+		available, nextVersion, err := runUpdate(cmd.Context(), configPath, settings, false, false, cmd.OutOrStdout())
 		if err != nil {
 			return err
 		}
+		view := newSetupOutput(cmd.OutOrStdout())
 		if available {
-			fmt.Fprintln(cmd.OutOrStdout(), "A signed update is available.")
+			view.info(fmt.Sprintf("A signed update is available (v%s).", displayText(nextVersion)))
 		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), "Agent is up to date.")
+			view.ok("Agent is up to date.")
 		}
 
 		return nil
@@ -120,14 +151,15 @@ var updateNowCmd = &cobra.Command{
 		}
 
 		printRestoreUpgradeNotice(cmd.Context(), cmd.OutOrStdout(), settings, database.CheckRestoreTriggerAccess)
-		available, err := checkAndMaybeInstall(cmd.Context(), configPath, settings, true, false)
+		available, _, err := runUpdate(cmd.Context(), configPath, settings, true, false, cmd.OutOrStdout())
 		if err != nil {
 			return err
 		}
+		view := newSetupOutput(cmd.OutOrStdout())
 		if available {
-			fmt.Fprintln(cmd.OutOrStdout(), "Update verified; replacement helper started. Check the installed version after it exits.")
+			view.ok("Update verified; replacement helper started. Check the installed version after it exits.")
 		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), "Agent is up to date.")
+			view.ok("Agent is up to date.")
 		}
 
 		return nil
