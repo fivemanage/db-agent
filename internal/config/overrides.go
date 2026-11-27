@@ -50,6 +50,10 @@ func SaveDashboardOverrides(path string, overrides DashboardOverrides) error {
 		return err
 	}
 
+	if overridesUnchanged(c, overrides) {
+		return nil
+	}
+
 	return updateDocument(path, func(root *yaml.Node) error {
 		if overrides.AutoUpdate != nil {
 			if err := setYAML(root, "auto_update", *overrides.AutoUpdate); err != nil {
@@ -120,4 +124,24 @@ func setYAML(root *yaml.Node, key string, value any) error {
 	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, &encoded)
 
 	return nil
+}
+
+func overridesUnchanged(c Config, overrides DashboardOverrides) bool {
+	if overrides.AutoUpdate != nil && c.AutoUpdate != *overrides.AutoUpdate {
+		return false
+	}
+	b := overrides.Backup
+	if b.Schedule != nil && c.Backup.Schedule != *b.Schedule {
+		return false
+	}
+	if b.RetentionDays != nil && c.Backup.RetentionDays != *b.RetentionDays {
+		return false
+	}
+	if b.Compression != nil && c.Backup.Compression != *b.Compression {
+		return false
+	}
+	if b.ThrottleIO != nil && c.Backup.ThrottleIO != *b.ThrottleIO {
+		return false
+	}
+	return true
 }

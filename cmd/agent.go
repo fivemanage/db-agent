@@ -68,7 +68,15 @@ func runConfiguredAgent(ctx context.Context, path string, output, errorOutput io
 	startupReady := readiness.get().Status == controlplane.Idle
 
 	client.OnOverrides = func(ctx context.Context, overrides config.DashboardOverrides) error {
-		return applyAgentOverrides(ctx, path, scheduler, overrides)
+		if err := applyAgentOverrides(ctx, path, scheduler, overrides); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Never terminate the service over a transient local config lock;
+			// the agent will retry on the next heartbeat that carries overrides.
+			fmt.Fprintln(errorOutput, "Warning: could not apply dashboard configuration right now; keeping current local settings.")
+		}
+		return nil
 	}
 
 	runner, err := newBackupRunner(path, settings, client)

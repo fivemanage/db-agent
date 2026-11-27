@@ -32,6 +32,23 @@ func TestOverridesPreserveLocalSecretsAndUnknownSettingsDuringIncompleteSetup(t 
 			t.Fatal("unknown local field lost")
 		}
 	}
+
+	// Re-applying identical overrides must be a no-op so Windows steady-state
+	// heartbeats never needlessly rewrite config.yaml.
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveDashboardOverrides(path, overrides); err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("identical dashboard overrides unnecessarily replaced config.yaml")
+	}
 }
 
 func TestOverridesRejectSecretInjectionAndBadPolicyWithoutEchoingValues(t *testing.T) {

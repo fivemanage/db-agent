@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/fivemanage/db-agent/internal/securefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -65,7 +66,7 @@ func updateDocumentWith(path string, update func(*yaml.Node) error, replace func
 		return errors.New("config must be an existing regular file; check its path and permissions")
 	}
 
-	original, err := os.ReadFile(path)
+	original, err := securefile.Read(path, 1<<20)
 	if err != nil {
 		return errors.New("cannot read config; check file permissions")
 	}
@@ -111,7 +112,7 @@ func updateDocumentWith(path string, update func(*yaml.Node) error, replace func
 		return fmt.Errorf("close private config: %w", err)
 	}
 
-	current, err := os.ReadFile(path)
+	current, err := securefile.Read(path, 1<<20)
 	if err != nil || !bytes.Equal(current, original) {
 		return errors.New("config changed during setup; rerun configure to avoid overwriting changes")
 	}
